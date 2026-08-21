@@ -70,10 +70,16 @@ if st.button("Resolve", type="primary", disabled=not url):
 if st.session_state.manual_link_prompt:
     e = st.session_state.manual_link_prompt
     st.warning(f"Couldn't auto-resolve this link: {e.reason}")
-    manual_url = st.text_input("Paste a direct audio file URL or podcast RSS item link instead")
+    manual_url = st.text_input("Paste a direct audio file URL or podcast RSS feed URL instead")
     if st.button("Use this link", disabled=not manual_url):
         with st.spinner("Downloading audio..."):
-            resolved = resolve_direct(manual_url, str(work_dir))
+            try:
+                resolved = resolve_direct(
+                    manual_url, str(work_dir), episode_title_hint=e.episode_title, published_date_hint=""
+                )
+            except NeedsManualLink as e2:
+                st.session_state.manual_link_prompt = e2
+                st.rerun()
             resolved.podcast_name = e.podcast_name or resolved.podcast_name
             resolved.episode_title = e.episode_title or resolved.episode_title
             resolved.source_url = e.source_url or resolved.source_url

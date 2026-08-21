@@ -4,8 +4,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import yt_dlp
+from yt_dlp.utils import DownloadError
 
-from .common import ResolvedAudio
+from .common import NeedsManualLink, ResolvedAudio
 
 
 def resolve_youtube(url: str, download_dir: str) -> ResolvedAudio:
@@ -27,9 +28,19 @@ def resolve_youtube(url: str, download_dir: str) -> ResolvedAudio:
         "no_warnings": True,
     }
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        audio_path = str(Path(download_dir) / f"{info['id']}.mp3")
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+    except DownloadError as e:
+        raise NeedsManualLink(
+            "YouTube refused this server's download request. This is common when the app runs "
+            "on a cloud host, since YouTube blocks many datacenter IPs — it isn't something this "
+            "app can work around. Try an Apple Podcasts or direct RSS/audio link instead, or run "
+            "the app locally for YouTube links.",
+            source_url=url,
+        ) from e
+
+    audio_path = str(Path(download_dir) / f"{info['id']}.mp3")
 
     upload_date = info.get("upload_date", "")  # YYYYMMDD
     published_date = (

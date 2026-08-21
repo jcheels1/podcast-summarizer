@@ -17,7 +17,7 @@ import feedparser
 import requests
 from rapidfuzz import fuzz
 
-from .common import NeedsManualLink, ResolvedAudio, download_binary
+from .common import NeedsManualLink, ResolvedAudio, audio_link_from_feed_entry, download_binary
 from config import load_settings
 
 TOKEN_URL = "https://accounts.spotify.com/api/token"
@@ -122,9 +122,7 @@ def resolve_spotify(url: str, download_dir: str) -> ResolvedAudio:
             source_url=url,
         )
 
-    audio_link = next((l.href for l in best_entry.get("links", []) if "audio" in l.get("type", "")), None)
-    if not audio_link and best_entry.get("enclosures"):
-        audio_link = best_entry.enclosures[0].get("href")
+    audio_link = audio_link_from_feed_entry(best_entry)
     if not audio_link:
         raise NeedsManualLink(
             "Matched the episode in the RSS feed but it has no audio enclosure.",

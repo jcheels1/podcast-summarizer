@@ -14,15 +14,17 @@ Strategy:
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import date, datetime
 
 import feedparser
 import requests
 from rapidfuzz import fuzz
 
-from .common import NeedsManualLink, ResolvedAudio, download_binary
+from .common import NeedsManualLink, ResolvedAudio, audio_link_from_feed_entry, download_binary
 
 ITUNES_LOOKUP = "https://itunes.apple.com/lookup"
+TITLE_MATCH_THRESHOLD = 75
+DATE_PROXIMITY_DAYS = 3
 
 
 def _extract_ids(url: str) -> tuple[str | None, str | None]:
@@ -82,16 +84,27 @@ def resolve_apple_podcasts(url: str, download_dir: str) -> ResolvedAudio:
             source_url=url,
         )
 
+    ref_date = None
+    if published_date:
+        try:
+            ref_date = datetime.strptime(published_date, "%Y-%m-%d").date()
+        except ValueError:
+            ref_date = None
+
     feed = feedparser.parse(feed_url)
     best_entry = None
     best_score = 0
     for entry in feed.entries:
         score = fuzz.token_set_ratio(episode_title, entry.get("title", ""))
+        if ref_date and entry.get("published_parsed"):
+            entry_date = date(*entry.published_parsed[:3])
+            if abs((entry_date - ref_date).days) > DATE_PROXIMITY_DAYS:
+                score -= 20  # penalize but don't disqualify outright
         if score > best_score:
             best_score = score
             best_entry = entry
 
-    if not best_entry or best_score < 70:
+    if not best_entry or best_score < TITLE_MATCH_THRESHOLD:
         raise NeedsManualLink(
             "Found the podcast's RSS feed but couldn't confidently match this episode in it.",
             podcast_name=podcast_name,
@@ -99,9 +112,7 @@ def resolve_apple_podcasts(url: str, download_dir: str) -> ResolvedAudio:
             source_url=url,
         )
 
-    audio_link = next((l.href for l in best_entry.get("links", []) if "audio" in l.get("type", "")), None)
-    if not audio_link and best_entry.get("enclosures"):
-        audio_link = best_entry.enclosures[0].get("href")
+    audio_link = audio_link_from_feed_entry(best_entry)
     if not audio_link:
         raise NeedsManualLink(
             "Matched the episode in the RSS feed but it has no audio enclosure.",
