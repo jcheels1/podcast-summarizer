@@ -102,6 +102,39 @@ Notion page titles (`notion_export.push_topic`) were changed the same way
 context is still available via the page's Date/URL properties when the
 target database has them.
 
+## Apple Podcasts episode matching: the API has real gaps
+
+Apple's iTunes Lookup API (`entity=podcastEpisode`) frequently returns zero
+results for a completely valid episode URL — this isn't a rate limit or a
+matching-confidence problem, it's a real gap in Apple's own data (confirmed
+by testing against a live example: the podcast-level lookup worked fine and
+returned 181 episodes, but the specific episode id from the URL returned
+`resultCount: 0`). When that happens, `resolve_apple_podcasts` has no title
+to fuzzy-match against the RSS feed at all.
+
+The fix (`apple_podcasts.py`): fall back to the URL's own slug (the text
+between `/podcast/` and `/id...`) as a match hint whenever the API doesn't
+return a title. Apple generates that slug directly from the episode title,
+so it's a reliable, always-available signal requiring no extra API calls.
+Real-world testing (same example) showed the correct episode scoring ~71
+via `rapidfuzz.fuzz.token_set_ratio` against this slug-derived hint, while
+neighboring wrong episodes in the same feed scored 32-41 — a wide enough
+gap that `TITLE_MATCH_THRESHOLD = 60` is safe. This threshold applies to
+both the clean-API-title case (which typically scores far higher) and the
+slug-fallback case, so don't raise it without re-testing against a slug-hint
+example — a clean-title-only assumption would make it too strict for the
+common no-title case.
+
+Separately: if Apple Podcasts resolution ever fails locally with a
+*connection* error (not a "couldn't confidently match" error), that's a
+different, unrelated problem — a Windows-machine-specific Python/OpenSSL
+TLS handshake failure was observed connecting to `itunes.apple.com`
+specifically (`SSLEOFError`), while the exact same request succeeded via
+PowerShell's native WinHTTP stack and via the Linux-based Streamlit Cloud
+deployment. Forcing TLS 1.2 didn't fix it. Likely cause is antivirus/
+security-software TLS inspection interfering with Python's OpenSSL for that
+one domain — an environment issue, not something fixable in this app's code.
+
 ## Notion push is schema-aware, not schema-fixed
 
 `notion_export.py` reads your database's actual property schema

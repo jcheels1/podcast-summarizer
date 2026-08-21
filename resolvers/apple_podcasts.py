@@ -10,6 +10,14 @@ Strategy:
 2. If `episodeUrl` is missing, fall back to looking up the podcast's RSS
    feed (via the collection id) and fuzzy-matching the episode by title +
    release date proximity.
+
+In practice, Apple's `entity=podcastEpisode` lookup frequently returns zero
+results even for a valid episode id/URL — a real gap in that API, not a
+matching-confidence issue. When that happens there's no title to match
+against at all. The URL's own slug (the text between `/podcast/` and
+`/id...`) is reliably the episode title in kebab-case (Apple generates it
+directly from the title), so it's used as a fallback match hint whenever
+the API doesn't give us a real title.
 """
 from __future__ import annotations
 
@@ -23,7 +31,11 @@ from rapidfuzz import fuzz
 from .common import NeedsManualLink, ResolvedAudio, audio_link_from_feed_entry, download_binary
 
 ITUNES_LOOKUP = "https://itunes.apple.com/lookup"
-TITLE_MATCH_THRESHOLD = 75
+# Slug-derived title hints (used when Apple's episode-lookup API returns no
+# data, which is common) score lower than clean API titles even for a
+# correct match — real-world testing showed ~71 for the right episode vs.
+# ~32-41 for wrong ones in the same feed, so 60 keeps a wide safety margin.
+TITLE_MATCH_THRESHOLD = 60
 DATE_PROXIMITY_DAYS = 3
 
 
@@ -34,6 +46,13 @@ def _extract_ids(url: str) -> tuple[str | None, str | None]:
         collection_match.group(1) if collection_match else None,
         episode_match.group(1) if episode_match else None,
     )
+
+
+def _title_hint_from_slug(url: str) -> str:
+    match = re.search(r"/podcast/([^/]+)/id\d+", url)
+    if not match:
+        return ""
+    return match.group(1).replace("-", " ").strip()
 
 
 def resolve_apple_podcasts(url: str, download_dir: str) -> ResolvedAudio:
@@ -60,6 +79,11 @@ def resolve_apple_podcasts(url: str, download_dir: str) -> ResolvedAudio:
             if episode_audio_url:
                 path = download_binary(episode_audio_url, download_dir, filename_hint=episode_title or "episode")
                 return ResolvedAudio(path, podcast_name, episode_title, published_date, url)
+
+    if not episode_title:
+        # Apple's episode-lookup API commonly returns nothing even for a
+        # valid episode URL; fall back to the URL slug as a match hint.
+        episode_title = _title_hint_from_slug(url)
 
     if not collection_id:
         raise NeedsManualLink(
@@ -121,7 +145,7 @@ def resolve_apple_podcasts(url: str, download_dir: str) -> ResolvedAudio:
             source_url=url,
         )
 
-    final_title = episode_title or best_entry.get("title", "")
+    final_title = best_entry.get("title", "") or episode_title
     if not published_date and best_entry.get("published"):
         published_date = _parse_date(best_entry.get("published"))
 
