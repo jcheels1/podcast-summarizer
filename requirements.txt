@@ -1,0 +1,11 @@
+streamlit>=1.38
+yt-dlp>=2024.8.6
+faster-whisper>=1.0.3
+anthropic>=0.34.0
+notion-client>=2.2.1
+reportlab>=4.2.2
+requests>=2.32.3
+python-dotenv>=1.0.1
+feedparser>=6.0.11
+rapidfuzz>=3.9.6
+groq>=0.11.0
