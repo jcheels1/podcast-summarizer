@@ -124,7 +124,14 @@ class PostgresStore:
     def _connect(self):
         import psycopg
 
-        return psycopg.connect(self.dsn)
+        # prepare_threshold=None turns off server-side prepared statements.
+        # Hosted Postgres is usually reached through a transaction-mode
+        # pooler (Neon's -pooler endpoint, Supabase's port 6543), which hands
+        # each transaction a different backend — a prepared statement made on
+        # one is missing on the next, and the error it produces reads like a
+        # driver bug. Nothing here runs the same query often enough for
+        # prepares to be worth the risk.
+        return psycopg.connect(self.dsn, prepare_threshold=None)
 
     def _ensure_table(self, conn) -> None:
         if self._ensured:
