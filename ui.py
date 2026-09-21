@@ -72,10 +72,26 @@ def get_library(settings=None) -> Library:
         return Library.load(LocalStore())
 
 
-def store_caption(library: Library) -> None:
+def store_caption(library: Library, settings=None) -> None:
     """One line in the sidebar saying where the library is being kept, so a
-    deployment that quietly lost its database is obvious."""
-    st.sidebar.caption(f"Library: {library.store.label}")
+    deployment that quietly lost its database is obvious.
+
+    "this machine" has two very different causes on a deployed app — no
+    DATABASE_URL reached the container, or one did and the database was
+    unreachable — and the fix differs (set the secret and reboot vs. check
+    the connection string). Naming which one it is here saves guessing from
+    the outside, where the app is password-gated and all you can see is this
+    caption.
+    """
+    settings = settings or load_settings()
+    on_disk = isinstance(library.store, LocalStore)
+    if on_disk and settings.database_url:
+        detail = " — DATABASE_URL is set but the database was unreachable"
+    elif on_disk:
+        detail = " — no DATABASE_URL configured"
+    else:
+        detail = ""
+    st.sidebar.caption(f"Library: {library.store.label}{detail}")
 
 
 # --- sidebar ------------------------------------------------------------------
