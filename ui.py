@@ -12,9 +12,11 @@ import jobs
 import pdf_export
 import speakers
 import summarizer
+from config import load_settings
 from feeds import Episode
 from library import Library
 from notion_export import push_topic
+from stores import LocalStore, make_store
 from transcription import GEMINI_MODELS, GROQ_MODELS, LOCAL_MODEL_SIZES
 
 TRANSCRIPTION_PROVIDERS = {
@@ -44,15 +46,36 @@ def episode_from_entry(entry: dict) -> Episode:
     return Episode(**{k: v for k, v in entry.items() if k in fields})
 
 
-def get_library() -> Library:
-    """The library, re-read from disk for each run.
+def get_library(settings=None) -> Library:
+    """The library, re-read from its store for each run.
 
-    Deliberately not cached: it's a small JSON file, every mutation writes it
-    straight back, and a cached instance would go stale the moment anything
-    else touched the file — including another browser tab, or an edit to this
-    code while the server is running.
+    Deliberately not cached: it's one small document, every mutation writes
+    it straight back, and a cached instance would go stale the moment
+    anything else touched it — another browser tab, another deployment, or
+    an edit to this code while the server is running.
+
+    If a database is configured but unreachable, the app falls back to local
+    files and says so loudly. Silently writing to a container filesystem
+    that is about to be wiped would be the worse failure.
     """
-    return Library.load()
+    settings = settings or load_settings()
+    store = make_store(settings.database_url)
+    try:
+        return Library.load(store)
+    except Exception as e:  # noqa: BLE001 - a dead database shouldn't be a blank page
+        if settings.database_url:
+            st.error(
+                f"Couldn't reach the library database ({type(e).__name__}: {e}). Falling back to "
+                "local files — on a deployed app, anything saved now is lost on the next restart.",
+                icon=":material/database_off:",
+            )
+        return Library.load(LocalStore())
+
+
+def store_caption(library: Library) -> None:
+    """One line in the sidebar saying where the library is being kept, so a
+    deployment that quietly lost its database is obvious."""
+    st.sidebar.caption(f"Library: {library.store.label}")
 
 
 # --- sidebar ------------------------------------------------------------------

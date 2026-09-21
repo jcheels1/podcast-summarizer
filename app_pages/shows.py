@@ -4,9 +4,11 @@ from __future__ import annotations
 import streamlit as st
 
 import ui
+from config import load_settings
 from feeds import FeedError, discover_feed_url, fetch_feed
 
-library = ui.get_library()
+settings = load_settings()
+library = ui.get_library(settings)
 
 st.title("Shows")
 st.caption("Add the podcasts you follow. The feed scans all of them each time you open it.")

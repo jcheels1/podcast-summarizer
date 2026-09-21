@@ -36,6 +36,10 @@ class Settings:
     groq_api_key: str | None
     gemini_api_key: str | None
     app_password: str | None
+    # Postgres connection string. Unset locally (the library lives in
+    # data/); set when deployed, where the container's filesystem does not
+    # survive a restart. See stores.py.
+    database_url: str | None
 
     @property
     def spotify_configured(self) -> bool:
@@ -64,6 +68,7 @@ def load_settings() -> Settings:
         groq_api_key=_get("GROQ_API_KEY"),
         gemini_api_key=_get("GEMINI_API_KEY"),
         app_password=_get("APP_PASSWORD"),
+        database_url=_get("DATABASE_URL"),
     )
 
 

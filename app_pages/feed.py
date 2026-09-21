@@ -18,7 +18,8 @@ from config import load_settings
 from feeds import DEFAULT_EPISODE_LIMIT, Episode, FeedError, fetch_feed
 
 settings = load_settings()
-library = ui.get_library()
+library = ui.get_library(settings)
+ui.store_caption(library)
 
 st.title("Feed")
 

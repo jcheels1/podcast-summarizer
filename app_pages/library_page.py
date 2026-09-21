@@ -7,7 +7,7 @@ import ui
 from config import load_settings
 
 settings = load_settings()
-library = ui.get_library()
+library = ui.get_library(settings)
 
 st.title("Library")
 

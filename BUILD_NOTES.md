@@ -10,8 +10,9 @@ feeds.py  ->  subscribed RSS feeds -> Episode metadata + enclosure URLs
   |            (a pasted link instead goes through resolvers/, which gives
   |             back the same shape with a local audio path)
   v
-library.py  ->  data/library.json: subscriptions, the episode index, and
-  |              every transcript/summary produced (data/episodes/<key>/)
+library.py  ->  subscriptions, the episode index, and every
+  |              transcript/summary produced, as JSON documents
+  |              (stores.py decides whether those land in data/ or Postgres)
   v
 jobs.py  ->  the one pipeline both entry points use:
       transcription.py  ->  timestamped segments; raw per-chunk speaker
@@ -34,6 +35,41 @@ plus the page scripts in `app_pages/`, with `ui.py` holding the pieces they
 share — the settings sidebar, the episode card, and the job runner. Nothing
 below `ui.py` imports Streamlit, so every module still works standalone from
 a script or a different front end.
+
+## Storage: why there is a seam at all (`stores.py`)
+
+The app was local-first, so the library was simply files under `data/`.
+That breaks the moment it is deployed: Streamlit Community Cloud gives a
+container whose filesystem is wiped on every restart and redeploy, so
+subscriptions and finished transcripts would silently reset. The old
+version didn't care because it kept no state between sessions; this one is
+built around keeping it.
+
+Rather than special-case the cloud, `library.py` now talks to a three-method
+store — `read(key)`, `write(key, value)`, `delete_prefix(prefix)` — over
+keys that look like paths (`library`, `episodes/<key>/transcript`). Two
+implementations: `LocalStore` writes the same JSON files as before, and
+`PostgresStore` keeps one `podcast_library` table of `(key, value jsonb)`.
+`make_store()` picks on one condition — is `DATABASE_URL` set — so local
+behaviour is untouched and the deployed app needs exactly one secret.
+
+Consequences worth knowing:
+
+- **Writes are no longer free.** The feed calls `save()` on every rerun,
+  which cost nothing against a file and costs a network round trip against
+  a database. `Library` therefore tracks a dirty flag: `record_episode`
+  compares against what is already indexed and a re-scan that finds nothing
+  new writes nothing at all.
+- **Connections are per operation, not pooled.** A handful of documents move
+  per episode, so the simplicity beats the round trips, and nothing is held
+  across a Streamlit rerun that may never resume.
+- **A dead database must be loud.** `ui.get_library` catches a failed load,
+  says so, and falls back to local files; the sidebar always names the store
+  in use. Silently writing to a filesystem that is about to be wiped is the
+  worse failure, and the one most likely to go unnoticed.
+- Local and cloud libraries are separate stores. Nothing syncs between them,
+  by design — syncing would mean reconciling two divergent JSON documents
+  with no good conflict story.
 
 ## The feed
 

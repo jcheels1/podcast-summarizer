@@ -1,29 +1,32 @@
-"""On-disk state: which shows are followed, what's been seen in their feeds,
-and every transcript and summary produced so far.
+"""Persistent state: which shows are followed, what's been seen in their
+feeds, and every transcript and summary produced so far.
 
-Everything lives under ``data/`` next to the app, as plain JSON:
+Three JSON documents per episode's worth of work:
 
-    data/library.json            subscriptions + per-episode index
-    data/episodes/<key>/transcript.json
-    data/episodes/<key>/summary.json
+    library                      subscriptions + per-episode index
+    episodes/<key>/transcript
+    episodes/<key>/summary
 
-Small, greppable and trivially backed up. The index is what lets the feed
-show "Transcript ✓ / Summary ✓" without opening anything, and what carries a
-show's recurring hosts from one episode to the next so speaker naming keeps
-improving the more of a show you process.
+Where those documents actually live is ``stores.py``'s problem — files under
+``data/`` locally, Postgres when the app is deployed. The index is what lets
+the feed show "Transcript ✓ / Summary ✓" without opening anything, and what
+carries a show's recurring hosts from one episode to the next so speaker
+naming keeps improving the more of a show you process.
 """
 from __future__ import annotations
 
-import json
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
 
 from feeds import Episode
-
-DATA_DIR = Path(__file__).parent / "data"
-LIBRARY_FILE = DATA_DIR / "library.json"
-EPISODES_DIR = DATA_DIR / "episodes"
+from stores import (
+    LIBRARY_KEY,
+    LocalStore,
+    Store,
+    episode_prefix,
+    summary_key,
+    transcript_key,
+)
 
 # A name has to show up in this many processed episodes of a show before it's
 # treated as a host rather than a one-off guest.
@@ -55,40 +58,43 @@ class Subscription:
 
 
 class Library:
-    """The whole on-disk state, read and written as one JSON document."""
+    """The whole persistent state, read and written as one JSON document
+    plus one document per produced artifact."""
 
-    def __init__(self, data: dict | None = None):
+    def __init__(self, data: dict | None = None, store: Store | None = None):
         data = data or {}
+        self.store: Store = store or LocalStore()
         self.subscriptions: list[Subscription] = [
             Subscription(**s) for s in data.get("subscriptions", [])
         ]
         # episode key -> everything known about that episode
         self.episodes: dict[str, dict] = data.get("episodes", {})
+        # Whether anything has changed since the last write. The feed calls
+        # save() on every rerun, which costs nothing against a local file but
+        # is a network round trip against a database.
+        self._dirty = False
 
     # --- persistence ----------------------------------------------------
 
     @classmethod
-    def load(cls) -> "Library":
-        if not LIBRARY_FILE.exists():
-            return cls()
-        try:
-            return cls(json.loads(LIBRARY_FILE.read_text(encoding="utf-8")))
-        except (json.JSONDecodeError, TypeError):
-            # A corrupt library shouldn't lock you out of the app; the old
-            # file is kept alongside in case it's worth rescuing by hand.
-            LIBRARY_FILE.replace(LIBRARY_FILE.with_suffix(".corrupt.json"))
-            return cls()
+    def load(cls, store: Store | None = None) -> "Library":
+        store = store or LocalStore()
+        data = store.read(LIBRARY_KEY)
+        return cls(data if isinstance(data, dict) else None, store=store)
 
-    def save(self) -> None:
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "version": 1,
-            "subscriptions": [asdict(s) for s in self.subscriptions],
-            "episodes": self.episodes,
-        }
-        tmp = LIBRARY_FILE.with_suffix(".tmp")
-        tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-        tmp.replace(LIBRARY_FILE)
+    def save(self, force: bool = False) -> None:
+        """Write the index back, unless nothing has changed since it was read."""
+        if not (self._dirty or force):
+            return
+        self.store.write(
+            LIBRARY_KEY,
+            {
+                "version": 1,
+                "subscriptions": [asdict(s) for s in self.subscriptions],
+                "episodes": self.episodes,
+            },
+        )
+        self._dirty = False
 
     # --- subscriptions --------------------------------------------------
 
@@ -100,10 +106,12 @@ class Library:
         if existing:
             existing.show_name = show_name or existing.show_name
             existing.image_url = image_url or existing.image_url
+            self._dirty = True
             self.save()
             return existing
         subscription = Subscription(feed_url=feed_url, show_name=show_name, image_url=image_url)
         self.subscriptions.append(subscription)
+        self._dirty = True
         self.save()
         return subscription
 
@@ -111,6 +119,7 @@ class Library:
         """Unfollow a show. Transcripts and summaries already produced are
         left on disk — dropping a feed shouldn't destroy finished work."""
         self.subscriptions = [s for s in self.subscriptions if s.feed_url != feed_url]
+        self._dirty = True
         self.save()
 
     def remember_names(self, feed_url: str, names: list[str]) -> None:
@@ -120,6 +129,7 @@ class Library:
             return
         for name in names:
             subscription.name_counts[name] = subscription.name_counts.get(name, 0) + 1
+        self._dirty = True
         self.save()
 
     def known_names_for(self, feed_url: str) -> list[str]:
@@ -136,21 +146,27 @@ class Library:
         """Index an episode seen in a feed, preserving anything already
         computed for it (blurb, guests, produced artifacts)."""
         entry = self.episodes.setdefault(episode.key, {})
-        entry.update(
-            {
-                "key": episode.key,
-                "feed_url": episode.feed_url,
-                "show_name": episode.show_name,
-                "title": episode.title,
-                "published_date": episode.published_date,
-                "duration_seconds": episode.duration_seconds,
-                "description": episode.description,
-                "audio_url": episode.audio_url,
-                "episode_url": episode.episode_url,
-                "image_url": episode.image_url,
-            }
-        )
-        entry.setdefault("first_seen", _now())
+        fields = {
+            "key": episode.key,
+            "feed_url": episode.feed_url,
+            "show_name": episode.show_name,
+            "title": episode.title,
+            "published_date": episode.published_date,
+            "duration_seconds": episode.duration_seconds,
+            "description": episode.description,
+            "audio_url": episode.audio_url,
+            "episode_url": episode.episode_url,
+            "image_url": episode.image_url,
+        }
+        # Re-reading a feed usually finds exactly what was there last time,
+        # and the feed does this on every rerun — only mark the library dirty
+        # when something actually differs.
+        if any(entry.get(name) != value for name, value in fields.items()):
+            self._dirty = True
+        entry.update(fields)
+        if "first_seen" not in entry:
+            entry["first_seen"] = _now()
+            self._dirty = True
         entry.setdefault("blurb", "")
         entry.setdefault("guests", episode.guests)
         # Blurbs and guests written by earlier runs win over the metadata
@@ -174,12 +190,14 @@ class Library:
         entry["blurb_tried"] = True
         if guests:
             entry["guests"] = guests
+        self._dirty = True
 
     def mark_blurb_tried(self, key: str) -> None:
         """Remember that this episode was put to the describer, so a feed that
         won't summarize (bad show notes, a model hiccup) is not retried on
         every single page load."""
         self.episodes.setdefault(key, {"key": key})["blurb_tried"] = True
+        self._dirty = True
 
     def needs_blurb(self, key: str) -> bool:
         entry = self.entry(key)
@@ -187,27 +205,22 @@ class Library:
 
     # --- artifacts ------------------------------------------------------
 
-    def _episode_dir(self, key: str) -> Path:
-        path = EPISODES_DIR / key
-        path.mkdir(parents=True, exist_ok=True)
-        return path
-
     def save_transcript(self, key: str, transcript, provider: str, speakers: list[str]) -> None:
-        payload = {
-            "full_text": transcript.full_text,
-            "segments": [
-                {
-                    "start": seg.start,
-                    "end": seg.end,
-                    "text": seg.text,
-                    "speaker": seg.speaker,
-                    "chunk": getattr(seg, "chunk", 0),
-                }
-                for seg in transcript.segments
-            ],
-        }
-        (self._episode_dir(key) / "transcript.json").write_text(
-            json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+        self.store.write(
+            transcript_key(key),
+            {
+                "full_text": transcript.full_text,
+                "segments": [
+                    {
+                        "start": seg.start,
+                        "end": seg.end,
+                        "text": seg.text,
+                        "speaker": seg.speaker,
+                        "chunk": getattr(seg, "chunk", 0),
+                    }
+                    for seg in transcript.segments
+                ],
+            },
         )
         entry = self.episodes.setdefault(key, {"key": key})
         entry["transcript"] = {
@@ -217,16 +230,16 @@ class Library:
             "words": len(transcript.full_text.split()),
             "segments": len(transcript.segments),
         }
+        self._dirty = True
         self.save()
 
     def load_transcript(self, key: str):
-        """Rebuild a saved transcript. Returns None if it isn't on disk."""
+        """Rebuild a saved transcript. Returns None if there isn't one."""
         from transcription import Segment, Transcript
 
-        path = EPISODES_DIR / key / "transcript.json"
-        if not path.exists():
+        payload = self.store.read(transcript_key(key))
+        if not payload:
             return None
-        payload = json.loads(path.read_text(encoding="utf-8"))
         segments = [
             Segment(
                 start=s.get("start", 0.0),
@@ -240,10 +253,7 @@ class Library:
         return Transcript(full_text=payload.get("full_text", ""), segments=segments)
 
     def save_summary(self, key: str, topics: list, provider: str) -> None:
-        payload = [{"title": t.title, "body": t.body} for t in topics]
-        (self._episode_dir(key) / "summary.json").write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        self.store.write(summary_key(key), [{"title": t.title, "body": t.body} for t in topics])
         entry = self.episodes.setdefault(key, {"key": key})
         entry["summary"] = {
             "created": _now(),
@@ -251,24 +261,23 @@ class Library:
             "topics": len(topics),
             "words": sum(t.word_count for t in topics),
         }
+        self._dirty = True
         self.save()
 
     def load_summary(self, key: str):
         from summarizer import TopicSummary
 
-        path = EPISODES_DIR / key / "summary.json"
-        if not path.exists():
+        payload = self.store.read(summary_key(key))
+        if not payload:
             return None
-        payload = json.loads(path.read_text(encoding="utf-8"))
         return [TopicSummary(title=item["title"], body=item["body"]) for item in payload]
 
     def delete_artifacts(self, key: str) -> None:
         """Throw away an episode's transcript and summary so it can be redone."""
-        import shutil
-
-        shutil.rmtree(EPISODES_DIR / key, ignore_errors=True)
+        self.store.delete_prefix(episode_prefix(key))
         entry = self.episodes.get(key)
         if entry:
             entry.pop("transcript", None)
             entry.pop("summary", None)
+        self._dirty = True
         self.save()

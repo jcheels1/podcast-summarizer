@@ -97,11 +97,33 @@ and guests, date — so a downloaded PDF still says what it came from.
 - **Transcript** — the full text, one paragraph per speaker turn, labelled
   and timestamped.
 
+## Where the library is kept
+
+Subscriptions, the episode index, and every transcript and summary are one
+small set of JSON documents. Locally they live under `data/` next to the
+app, and that is the default — nothing to configure.
+
+Deployed, that is not good enough: a hosted container's filesystem is wiped
+on every restart and redeploy, so the library would keep resetting. Set
+`DATABASE_URL` to a Postgres connection string and the same documents go
+there instead. To set it up on Streamlit Community Cloud:
+
+1. Create a free Postgres database — [Neon](https://neon.tech) or
+   [Supabase](https://supabase.com), neither of which asks for a card — and
+   copy its connection string.
+2. In the app's **Settings → Secrets** on Streamlit Cloud, add:
+   `DATABASE_URL = "postgresql://user:password@host/dbname?sslmode=require"`
+3. Reboot the app. The table is created on first use.
+
+The sidebar always says which one is in use ("Library: Postgres" or
+"Library: this machine"), so a deployment that lost its database is obvious
+rather than silent. Local and cloud libraries are separate; nothing syncs
+between them.
+
 ## Notes
 
-- Everything produced is stored under `data/` (`library.json` plus one
-  folder per episode). Deleting a show never deletes its documents; the
-  Library page deletes an individual episode's, so it can be redone.
+- Deleting a show never deletes its documents; the Library page deletes an
+  individual episode's, so it can be redone.
 - Feeds are re-read at most every 30 minutes; **Check for new episodes**
   forces a refresh.
 - Local Whisper models are downloaded on first use per size and cached

@@ -17,7 +17,7 @@ from resolvers.common import resolve_direct
 from speakers import extract_person_names
 
 settings = load_settings()
-library = ui.get_library()
+library = ui.get_library(settings)
 
 st.title("Single link")
 st.caption("Spotify, Apple Podcasts, YouTube, or a direct audio/RSS link.")

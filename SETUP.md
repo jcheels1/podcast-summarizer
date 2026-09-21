@@ -125,5 +125,10 @@ This opens the app in your browser (typically http://localhost:8501).
   (`library.json` plus one folder per episode). It is gitignored; back it up
   if you care about it. Downloaded audio goes to your temp directory
   instead, since it's large and re-downloadable.
+- Deploying? Set `DATABASE_URL` in the host's secrets to a free Postgres
+  (Neon or Supabase) — see README.md. Without it the deployed app keeps its
+  library on a container filesystem that is wiped on every restart, so
+  subscriptions and finished transcripts will not survive. Nothing to do for
+  local use.
 - The first time you open the app it has no podcasts. Add them on the
   **Shows** page — a show's name is enough.
