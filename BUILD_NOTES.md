@@ -6,22 +6,56 @@ further if today's setup stops being enough.
 ## Architecture overview
 
 ```
-link (Spotify/Apple/YouTube/direct)
-  -> resolvers/  ->  local audio file + metadata
-  -> transcription.py  ->  full transcript (+ timestamped segments),
-                            local (faster-whisper) or cloud (Groq)
-  -> summarizer.py  ->  Claude segments the episode into topics and drafts
-                         a 300-500 word summary per topic (with automatic
-                         expand/trim retries to enforce the word bounds)
-  -> pdf_export.py  ->  summary PDF and/or transcript PDF
-  -> notion_export.py  ->  one Notion page per topic (or one combined page)
+feeds.py  ->  subscribed RSS feeds -> Episode metadata + enclosure URLs
+  |            (a pasted link instead goes through resolvers/, which gives
+  |             back the same shape with a local audio path)
+  v
+library.py  ->  data/library.json: subscriptions, the episode index, and
+  |              every transcript/summary produced (data/episodes/<key>/)
+  v
+jobs.py  ->  the one pipeline both entry points use:
+      transcription.py  ->  timestamped segments; raw per-chunk speaker
+                             labels on the Gemini path, none on Whisper
+      speakers.py       ->  those labels (or no labels at all) become real,
+                             episode-wide identities
+      summarizer.py     ->  an LLM segments the episode into topics and
+                             drafts a 300-500 word summary per topic (with
+                             automatic expand/trim retries to enforce the
+                             word bounds); it also writes the feed's
+                             per-episode blurbs
+  v
+pdf_export.py    ->  summary PDF and/or transcript PDF, both opening with
+                      the same show/episode/guests/date header
+notion_export.py ->  one Notion page per topic (or one combined page)
 ```
 
-`app.py` (Streamlit) is a thin orchestration layer over these modules —
-each module works standalone and can be driven from a script or a
-different UI without changes.
+The UI is `app.py` (auth, prerequisites, shared sidebar, `st.navigation`)
+plus the page scripts in `app_pages/`, with `ui.py` holding the pieces they
+share — the settings sidebar, the episode card, and the job runner. Nothing
+below `ui.py` imports Streamlit, so every module still works standalone from
+a script or a different front end.
 
-## Transcription: local Whisper or Groq (cloud)
+## The feed
+
+`feeds.py` resolves whatever you paste — an RSS URL, an Apple Podcasts link,
+or a bare show name (looked up through the iTunes search API) — to a feed
+URL, then parses it into `Episode` records carrying title, date, duration,
+show notes, the audio enclosure and a stable `key` (a hash of feed URL +
+GUID) that everything else files work under. Spotify is refused outright
+rather than half-supported: it publishes no feeds, and its show URLs are
+opaque ids with no name to search on.
+
+Feed scans are cached for 30 minutes (`st.cache_data`), so switching views or
+pressing a button doesn't re-fetch. One unreachable feed warns and is
+skipped rather than emptying the page.
+
+Blurbs (`summarizer.describe_episodes`) are batched a dozen episodes to a
+call and written *after* the episode list has already rendered, so the feed
+never waits on a model call to appear; the page then reruns to repaint the
+cards. Episodes are marked `blurb_tried` whether or not the model answered,
+which is what stops a feed that won't describe from looping forever.
+
+## Transcription: local Whisper, Groq, or Gemini
 
 `transcription.py` exposes one dispatcher:
 
@@ -41,26 +75,144 @@ def transcribe(audio_path, provider="local", model="small", api_key=None, progre
   offset into the original episode's timeline. The app only shows the Groq
   option when `GROQ_API_KEY` is set in `.env`.
 
-**Neither path does speaker diarization** — transcripts are one continuous
-stream of text with timestamps, no "Speaker A / Speaker B" labels. Claude's
-summaries can only attribute a view to a named person when that person's
-name is actually spoken aloud in the audio. Otherwise it falls back to
-role-based attribution ("the host", "the guest"). To add diarization:
+- **`provider="gemini"`** (`transcribe_gemini`) uses Google's Gemini API.
+  Free tier; paid rates are ~$0.003/min. This is the only path that returns
+  **speaker labels**, which is the main reason it exists (see below).
 
-- **Cloud route**: Deepgram and AssemblyAI both support diarization
-  directly in their transcription response (a `speaker` field per
-  word/utterance). Add a new `transcribe_<provider>()` function in
-  `transcription.py` following the same pattern as `transcribe_groq`,
-  extend `Segment` with an optional `speaker: str | None` field, and wire
-  it into the `transcribe()` dispatcher and the provider radio in `app.py`.
-  Feeding `Speaker 1: ...` / `Speaker 2: ...` style text into the
-  summarization prompt would let Claude attribute names far more reliably
-  than it can today (`SEGMENT_AND_SUMMARIZE_PROMPT` in `prompts.py` already
-  instructs it to use speaker names *when available*).
-- **Local route**: `pyannote.audio` (a diarization model, separate from
-  Whisper) run as a post-processing pass over the audio, merged with the
-  Whisper segments by timestamp overlap. Needs a free Hugging Face token
-  and adds a `torch` dependency — heavier than the cloud-API route.
+### Diarization: why the Gemini path is different
+
+The two Whisper paths produce one continuous stream of timestamped text with
+no "Speaker A / Speaker B" labels. Gemini's do label speakers — but only as
+anonymous per-chunk labels. Turning either into names that hold for a whole
+episode is `speakers.py`'s job, described further down.
+
+Gemini's transcription models do diarization natively (`gemini-3.5-transcribe`
+is documented as doing speaker diarization and word timestamps for up to
+three speakers; 3+ is experimental). `Segment` therefore carries an optional
+`speaker: str | None`, populated only by that path, and
+`Transcript.text_for_summarization()` renders speaker-attributed turns
+(`Alice: ...` / `Speaker 1: ...`) when labels exist and plain running text
+when they don't. `SEGMENT_AND_SUMMARIZE_PROMPT` already instructed the model
+to use speaker names *when available*, so no prompt change was needed — the
+labels just make "when available" true far more often.
+
+Two things to know about that path:
+
+- **Chunking is about output size, not input size.** Gemini accepts ~9.5
+  hours of audio per request, so unlike Groq there's no input limit to work
+  around. But the transcript comes back as a single JSON array of segments,
+  and a 2-3 hour episode's array runs past the model's max output tokens and
+  gets truncated mid-array. `GEMINI_CHUNK_SECONDS = 1800` keeps each response
+  inside that ceiling. If you ever see a JSON parse error from
+  `_parse_gemini_segments`, that ceiling is the first thing to lower.
+- **Speaker labels are per-chunk, not per-episode.** "Speaker 1" in the first
+  half-hour and "Speaker 1" in the second are labelled independently, because
+  the model only ever sees one chunk. Two things address this. Each chunk
+  after the first is given a continuity block (`_continuity_block`) naming
+  the labels earlier chunks used, quoting how the previous chunk ended, and
+  listing the people the episode metadata names, which pushes it to reuse the
+  same label for the same voice. And every `Segment` records its `chunk`, so
+  `speakers.py` can still merge or split labels afterwards on the evidence
+  rather than trusting that carry-over.
+
+If you ever want diarization without Gemini: Deepgram and AssemblyAI both
+return a `speaker` field per word/utterance and would slot into the same
+`Segment.speaker` shape. Locally, `pyannote.audio` run as a post-processing
+pass over the audio and merged with the Whisper segments by timestamp overlap
+works too, but needs a Hugging Face token and a `torch` dependency.
+
+## Speaker identification (`speakers.py`)
+
+Raw labels are never shown to the user. Everything transcription produces
+goes through `resolve_speakers(transcript, context, call)`, where `context`
+is the show name, episode title, show notes, and the names this show has
+used before; `call` is any summarization backend.
+
+There are two paths:
+
+- **Diarized input** (Gemini) → `identify_speakers`. Every distinct
+  `(chunk, label)` pair is collected as `[part 2] Speaker 1`, and one model
+  call maps all of them onto identities. Two different raw labels mapping to
+  the same person is the expected case, not an error — that is how a chunk
+  boundary gets healed.
+- **Un-diarized input** (Whisper, local or Groq) → `assign_speakers`, then
+  `identify_speakers`. The first reads the dialogue in windows of ~120 lines
+  and returns only the lines where the speaker *changes*, which keeps the
+  output small enough to be affordable over a three-hour episode; each window
+  is told who was talking as it opened and which identities are already in
+  play. The second then reconciles the result across the whole episode. That
+  second pass is not redundant: a window that opens before anyone has been
+  named has to start with a placeholder, and real runs produced transcripts
+  whose first two lines were "Host" and whose later lines were "Ted Seides" —
+  the same person under two names. Reconciliation folds them together.
+
+Supporting decisions worth keeping:
+
+- **Evidence, not the whole transcript.** `_select_evidence` sends only the
+  opening three minutes of each part (introductions and re-introductions),
+  any line matching an introduction cue plus its neighbours, and enough of a
+  spread that no label goes unrepresented. Truncation drops from the *middle*
+  so the sign-off — another place names get said — survives.
+- **Never guess a name.** The prompt requires spoken or metadata evidence and
+  falls back to "Host" / "Guest 2". `_fill_gaps` covers labels the model
+  skipped entirely, and a model failure is caught and noted rather than
+  raised: an unnamed transcript beats no transcript.
+- **Metadata mining is a hint, never an attribution.** `extract_person_names`
+  pulls person-shaped names out of the title and show notes with a
+  deliberately conservative regex (the stopword list exists because
+  "With Jane Doe again" otherwise reads as a three-word name, and the guest
+  patterns are case-sensitive on the name for the same reason). Those names
+  are handed to the model alongside the audio; only the model ties one to a
+  voice.
+- **Hosts are learned, not configured.** `library.remember_names` counts how
+  often each identity appears across a show's processed episodes; two
+  appearances makes someone a host (`HOST_THRESHOLD`). That feeds back in as
+  `known_names` on the next episode, and drives the "Hosted by" line in
+  document headers, so a show's attribution gets better the more of it you
+  process.
+
+## Summarization backends: API key, Claude subscription, or Gemini
+
+`summarizer.py` treats a backend as nothing more than a callable
+`(prompt: str) -> str`, built by `make_backend(provider, api_key, model)`.
+Everything else in that module — prompt assembly, JSON extraction, the
+expand/trim length enforcement — is provider-agnostic, which is why adding
+two backends changed almost none of it.
+
+- **`anthropic`** — the original path. An Anthropic API key, billed per
+  token. Works everywhere, including a Streamlit Cloud deployment.
+- **`claude_code`** — the Claude Agent SDK (`claude-agent-sdk`), which wraps
+  the Claude Code CLI and borrows its logged-in Pro/Max OAuth session. Usage
+  draws on the plan's monthly Agent SDK credit ($20 Pro / $100 Max 5x / $200
+  Max 20x) rather than API billing, and does not count against interactive
+  Claude Code usage limits.
+- **`gemini`** — Gemini Flash via `client.interactions.create`. Only Flash and
+  Flash-Lite models are on the free tier (Pro models were removed from it in
+  April 2026), which is why `GEMINI_MODELS` lists only Flash tiers.
+
+Three non-obvious things about the subscription backend:
+
+1. **A set `ANTHROPIC_API_KEY` silently shadows the OAuth session** and bills
+   the API instead — no error, just an unexpected invoice. This app loads that
+   key from `.env` for the other backend, so `_anthropic_key_hidden()` pops it
+   (and `ANTHROPIC_AUTH_TOKEN`) from `os.environ` for the duration of a
+   subscription call and restores it afterwards. Don't remove that wrapper.
+2. **It is local-only, by construction.** The OAuth session lives on your
+   machine, not in a deployment, so `config.claude_subscription_available()`
+   checks for both the `claude_agent_sdk` import and the `claude` CLI on PATH,
+   and the option simply doesn't appear on Streamlit Cloud. That's why the
+   API-key backend stays rather than being replaced by it.
+3. **The harness is stripped down.** The Agent SDK ships all of Claude Code —
+   built-in file/bash tools, the Claude Code system prompt, project settings.
+   This app wants one text-in/text-out call, so it passes `tools=[]`, its own
+   `system_prompt`, `setting_sources=None`, and `max_turns=1`. The `tools=[]`
+   part is a security property, not just tidiness: a podcast transcript is
+   untrusted text from the internet, and with no tools there is nothing for a
+   prompt injection inside one to reach.
+
+The SDK is async and Streamlit is not, so each prompt runs to completion in
+its own `asyncio.run()`. That's fine here because every call is a
+self-contained one-shot with no shared session state.
 
 ## Why topic segmentation and summarization are one Claude call
 
@@ -94,9 +246,19 @@ execution"). For a single episode split into several topics, that prefix
 is identical across every section and reads as noise rather than useful
 labeling — the podcast name only varies when different entries come from
 different podcasts, which doesn't happen within one run of this app. Fixed
-by moving the podcast name + date to a one-time document-level header
-(`_episode_header` in `pdf_export.py`) and making each section's title
+by moving the identifying metadata to a one-time document-level header
+(`_document_header` in `pdf_export.py`) and making each section's title
 (`_section_title_paragraph`) describe only that section's own content.
+
+That header is now a `DocumentHeader` — show name, episode title, hosts,
+guests, date — built by `ui.document_header` and shared by the summary PDF,
+the transcript PDF and the on-screen previews, so all three identify an
+episode identically. Guests are the named, non-host speakers the resolution
+pass found; before a show has enough history for `library.hosts_for` to know
+its hosts, whoever speaks first is assumed to be one, which self-corrects as
+more episodes are processed. Paragraph text is escaped (`_escape`) on the
+way in, since reportlab parses its input as markup and an episode title
+containing `&` would otherwise fail the build.
 Notion page titles (`notion_export.push_topic`) were changed the same way
 — just the topic title, no podcast-name prefix — since the podcast/date
 context is still available via the page's Date/URL properties when the

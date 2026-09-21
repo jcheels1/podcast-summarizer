@@ -54,6 +54,13 @@ EPISODE METADATA:
 Podcast: {podcast_name}
 Episode title: {episode_title}
 Published: {published_date}
+Speakers: {speakers}
+
+The transcript below may be speaker-attributed, with each turn prefixed by \
+who is talking. Those attributions have already been resolved against the \
+audio and the episode's own metadata — use exactly those names when you \
+attribute a claim, and do not attribute anything to a name that is not in \
+the speaker list above.
 
 TRANSCRIPT:
 {transcript}
@@ -96,4 +103,115 @@ CURRENT SUMMARY (title: {title}):
 {body}
 
 Respond with ONLY a JSON object, no other text: {{"title": "...", "body": "..."}}
+"""
+
+# --- Speaker identification ---------------------------------------------------
+
+SPEAKER_ID_PROMPT = """\
+You are given excerpts from the transcript of a podcast episode. Every line \
+is tagged with a RAW speaker label produced by an automatic transcription \
+system. Those raw labels are unreliable in two specific ways:
+
+- They are usually generic ("Speaker 1") rather than a person's name.
+- The audio was transcribed in parts, and labels are only internally \
+consistent WITHIN a part. "[part 1] Speaker 1" and "[part 2] Speaker 1" may \
+or may not be the same person.
+
+Your job is to map every raw label to a real, consistent identity for the \
+whole episode.
+
+EPISODE METADATA:
+Podcast: {podcast_name}
+Episode title: {episode_title}
+Episode description: {episode_description}
+People previously seen on this show (may or may not appear here): {known_names}
+
+RAW LABELS TO MAP (map every one of these, exactly as written):
+{labels}
+
+TRANSCRIPT EXCERPTS:
+{excerpts}
+
+Rules:
+- Use a person's real name ONLY when the transcript or metadata supports it: \
+the name is spoken aloud (introductions, "thanks for having me, X", \
+sign-offs, being addressed by name), or the metadata names a guest and the \
+excerpts make clear which label is that guest. Never invent or guess a name, \
+and never assign a metadata name to a label you cannot tie to it.
+- When you cannot establish a name, use a role label instead: "Host", \
+"Co-host", "Guest", "Guest 2", "Caller", "Narrator", "Announcer". Number \
+them only when there is more than one of that role.
+- Two different raw labels CAN map to the same identity — that is expected \
+across part boundaries. Give them the identical name string.
+- One raw label maps to exactly one identity. If a label clearly covers two \
+people, pick the dominant one.
+- Names must be written identically everywhere they appear (same spelling, \
+same capitalization, full name where known, e.g. "Jane Doe" not "Jane" in \
+one place and "Doe" in another).
+
+Respond with ONLY a JSON object, no other text, in this exact shape:
+{{"speakers": [{{"label": "<raw label, copied exactly>", "name": "<identity>", \
+"role": "host|guest|other", "confidence": "high|medium|low", \
+"evidence": "<short quote or metadata reason, or empty>"}}]}}
+"""
+
+SPEAKER_ASSIGN_PROMPT = """\
+The following is a numbered stretch of a podcast transcript produced by a \
+transcription system that does NOT identify speakers, so the lines run \
+together with no attribution. Work out where the speaker changes and who is \
+talking.
+
+EPISODE METADATA:
+Podcast: {podcast_name}
+Episode title: {episode_title}
+Episode description: {episode_description}
+People previously seen on this show (may or may not appear here): {known_names}
+
+SPEAKERS ALREADY IDENTIFIED EARLIER IN THIS EPISODE (reuse these exact \
+strings whenever the same person is speaking): {roster}
+Who was speaking going into line {first_index}: {previous_speaker}
+
+TRANSCRIPT LINES:
+{lines}
+
+Rules:
+- Return ONLY the lines where the speaker CHANGES, as the line number plus \
+who starts speaking there. Every other line is assumed to continue whoever \
+was speaking before it.
+- Include line {first_index} itself whenever you can tell who speaks it and \
+it is not simply a continuation of the speaker named above. If these are the \
+opening lines of the episode, always include line {first_index}.
+- Use real names only where the transcript or metadata supports them \
+(spoken introductions, being addressed by name, a guest named in the \
+metadata whose identity is clear from the lines). Otherwise use "Host", \
+"Guest", "Guest 2", and so on. Never invent a name.
+- Spell each identity identically every time, and identically to the \
+already-identified list above when it is the same person.
+- Conversational back-and-forth is normal; short interjections ("right", \
+"yeah, exactly") are usually the OTHER person and are worth marking.
+
+Respond with ONLY a JSON object, no other text, in this exact shape:
+{{"turns": [{{"line": <line number>, "speaker": "<identity>"}}]}}
+"""
+
+EPISODE_BLURB_PROMPT = """\
+Below are newly published podcast episodes, each with whatever title and \
+show-notes text its feed provided. For each one, write a browsing blurb for \
+someone deciding whether to listen.
+
+For each episode give:
+- "guests": the people appearing as guests, as a JSON array of names. Take \
+them only from the title or show notes — never guess. Use [] when the \
+episode has no guests or none are named. Do not list the show's own hosts.
+- "blurb": two or three sentences, plain declarative prose, naming who is on \
+and what is actually discussed — specific companies, topics, claims or \
+questions, not "the hosts discuss a range of issues". No marketing copy, no \
+calls to action, no "in this episode". If the show notes are thin, say less \
+rather than padding it.
+
+EPISODES:
+{episodes}
+
+Respond with ONLY a JSON array, no other text, in this exact shape:
+[{{"index": <the episode's index above>, "guests": ["..."], "blurb": "..."}}]
 """

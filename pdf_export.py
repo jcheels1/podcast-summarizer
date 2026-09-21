@@ -1,8 +1,14 @@
 """Build PDF exports for topic summaries and full transcripts, using
-reportlab (pure-Python, no external binary dependency)."""
+reportlab (pure-Python, no external binary dependency).
+
+Every document opens with the same identifying header — show, episode,
+guests, date — so a PDF that has been downloaded, emailed or filed away
+still says what it came from.
+"""
 from __future__ import annotations
 
 import io
+from dataclasses import dataclass, field
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import LETTER
@@ -21,13 +27,23 @@ _title_style = ParagraphStyle(
     leading=15,
 )
 
-_doc_header_style = ParagraphStyle(
-    "DocHeader",
+_show_style = ParagraphStyle(
+    "ShowName",
     parent=_styles["Normal"],
     fontName="Helvetica-Bold",
-    fontSize=14,
-    spaceAfter=2,
-    leading=17,
+    fontSize=15,
+    spaceAfter=3,
+    leading=18,
+)
+
+_episode_style = ParagraphStyle(
+    "EpisodeTitle",
+    parent=_styles["Normal"],
+    fontName="Helvetica-Bold",
+    fontSize=11.5,
+    textColor=colors.HexColor("#333333"),
+    spaceAfter=3,
+    leading=15,
 )
 
 _body_style = ParagraphStyle(
@@ -46,7 +62,17 @@ _meta_style = ParagraphStyle(
     fontName="Helvetica-Oblique",
     fontSize=9,
     textColor=colors.grey,
-    spaceAfter=14,
+    spaceAfter=6,
+    leading=12,
+)
+
+_kind_style = ParagraphStyle(
+    "DocKind",
+    parent=_styles["Normal"],
+    fontName="Helvetica-Bold",
+    fontSize=8,
+    textColor=colors.grey,
+    spaceAfter=12,
 )
 
 _timestamp_style = ParagraphStyle(
@@ -60,27 +86,66 @@ _timestamp_style = ParagraphStyle(
 )
 
 
-def _episode_header(podcast_name: str, published_date: str) -> list:
-    """Episode-level header (podcast name + date), shown once at the top of
-    a document — never repeated per section, since it's the same for every
-    section in that document."""
+@dataclass
+class DocumentHeader:
+    """Who and what a document is about. Identical for summaries and
+    transcripts so the two read as a matched pair."""
+
+    show_name: str = ""
+    episode_title: str = ""
+    guests: list[str] = field(default_factory=list)
+    published_date: str = ""
+    source_url: str = ""
+    hosts: list[str] = field(default_factory=list)
+
+    def byline(self) -> str:
+        """Hosts, guests and date on one line, as escaped reportlab markup."""
+        parts = []
+        if self.hosts:
+            parts.append("Hosted by " + ", ".join(self.hosts))
+        if self.guests:
+            label = "Guest" if len(self.guests) == 1 else "Guests"
+            parts.append(f"{label}: " + ", ".join(self.guests))
+        if self.published_date:
+            parts.append(self.published_date)
+        return " &nbsp;&#183;&nbsp; ".join(_escape(part) for part in parts)
+
+
+def _escape(text: str) -> str:
+    """reportlab's Paragraph parses its input as markup, so raw &, < and >
+    from episode titles have to be escaped or the build fails."""
+    return (text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _document_header(header: DocumentHeader, kind: str) -> list:
+    """The identifying block at the top of every export: show name, episode
+    title, guests and date. Shown once per document, never per section —
+    it's the same for every section in that document."""
     story = []
-    if podcast_name:
-        story.append(Paragraph(podcast_name, _doc_header_style))
-    if published_date:
-        story.append(Paragraph(published_date, _meta_style))
+    if header.show_name:
+        story.append(Paragraph(_escape(header.show_name), _show_style))
+    if header.episode_title:
+        story.append(Paragraph(_escape(header.episode_title), _episode_style))
+
+    byline = header.byline()  # already contains intentional markup entities
+    if byline:
+        story.append(Paragraph(byline, _meta_style))
     else:
-        story.append(Spacer(1, 10))
+        story.append(Spacer(1, 6))
+
+    story.append(HRFlowable(width="100%", thickness=0.75, color=colors.HexColor("#999999")))
+    story.append(Spacer(1, 4))
+    story.append(Paragraph(kind, _kind_style))
     return story
 
 
 def _section_title_paragraph(title: str) -> Paragraph:
     """Per-section title — describes only that section's own content, never
     the podcast/episode it came from."""
-    return Paragraph(f"<u>{title}</u>", _title_style)
+    return Paragraph(f"<u>{_escape(title)}</u>", _title_style)
 
 
-def build_summary_pdf(topics: list, podcast_name: str, published_date: str, source_url: str = "") -> bytes:
+def build_summary_pdf(topics: list, header: DocumentHeader) -> bytes:
     """topics: list of objects with .title and .body attributes (TopicSummary)."""
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(
@@ -90,15 +155,16 @@ def build_summary_pdf(topics: list, podcast_name: str, published_date: str, sour
         rightMargin=0.9 * inch,
         topMargin=0.9 * inch,
         bottomMargin=0.9 * inch,
+        title=f"{header.episode_title} - summary" if header.episode_title else "Podcast summary",
     )
 
-    story = _episode_header(podcast_name, published_date)
+    story = _document_header(header, "SUMMARY")
     for i, topic in enumerate(topics):
         story.append(_section_title_paragraph(topic.title))
         for para in topic.body.split("\n\n"):
             para = para.strip()
             if para:
-                story.append(Paragraph(para, _body_style))
+                story.append(Paragraph(_escape(para), _body_style))
         if i < len(topics) - 1:
             story.append(Spacer(1, 6))
             story.append(HRFlowable(width="100%", thickness=0.5, color=colors.lightgrey))
@@ -116,9 +182,7 @@ def _format_timestamp(seconds: float) -> str:
 
 def build_transcript_pdf(
     segments: list,
-    podcast_name: str,
-    episode_title: str,
-    published_date: str,
+    header: DocumentHeader,
     timestamp_every_n_segments: int = 8,
 ) -> bytes:
     """segments: list of objects with .start (float seconds) and .text (str)."""
@@ -130,19 +194,61 @@ def build_transcript_pdf(
         rightMargin=0.9 * inch,
         topMargin=0.9 * inch,
         bottomMargin=0.9 * inch,
+        title=f"{header.episode_title} - transcript" if header.episode_title else "Podcast transcript",
     )
 
-    story = _episode_header(podcast_name, published_date)
-    story.append(_section_title_paragraph(f"{episode_title} — Full Transcript" if episode_title else "Full Transcript"))
+    story = _document_header(header, "FULL TRANSCRIPT")
 
+    if any(getattr(seg, "speaker", None) for seg in segments):
+        story.extend(_speaker_turn_flowables(segments))
+    else:
+        story.extend(_grouped_flowables(segments, timestamp_every_n_segments))
+
+    doc.build(story)
+    return buffer.getvalue()
+
+
+def _speaker_turn_flowables(segments: list) -> list:
+    """One paragraph per contiguous speaker turn, labelled and timestamped.
+    Used when the transcription backend did diarization — grouping by a fixed
+    segment count instead would split turns mid-sentence and bury the labels.
+    """
+    story = []
+    current_speaker = None
+    turn_words: list[str] = []
+    turn_start = 0.0
+
+    def flush():
+        if turn_words:
+            label = (
+                f"<b>{_escape(current_speaker)}</b> "
+                f"<font size=8 color=grey>[{_format_timestamp(turn_start)}]</font>"
+            )
+            story.append(Paragraph(f"{label}  {_escape(' '.join(turn_words))}", _body_style))
+
+    for seg in segments:
+        speaker = getattr(seg, "speaker", None) or "Unknown speaker"
+        if speaker != current_speaker:
+            flush()
+            current_speaker = speaker
+            turn_words = []
+            turn_start = seg.start
+        turn_words.append(seg.text)
+    flush()
+
+    return story
+
+
+def _grouped_flowables(segments: list, timestamp_every_n_segments: int) -> list:
+    """Fixed-size paragraphs with a periodic timestamp, for backends that
+    return an undifferentiated stream of text (local Whisper, Groq)."""
+    story = []
     paragraph_words: list[str] = []
     for i, seg in enumerate(segments):
         if i % timestamp_every_n_segments == 0:
             story.append(Paragraph(_format_timestamp(seg.start), _timestamp_style))
         paragraph_words.append(seg.text)
         if (i + 1) % timestamp_every_n_segments == 0 or i == len(segments) - 1:
-            story.append(Paragraph(" ".join(paragraph_words), _body_style))
+            story.append(Paragraph(_escape(" ".join(paragraph_words)), _body_style))
             paragraph_words = []
-
-    doc.build(story)
-    return buffer.getvalue()
+    return story
