@@ -282,6 +282,11 @@ def followed_shows(settings, store: Store) -> list[dict]:
                     "spotify_url": (show.get("external_urls") or {}).get("spotify", ""),
                     "total_episodes": show.get("total_episodes"),
                     "added_at": (item or {}).get("added_at", ""),
+                    # Kept so the UI can show what Spotify actually sent.
+                    # `publisher` came back empty for every show in a real
+                    # 80-show library, and this is how we tell "Spotify
+                    # withheld it" from "the mapping above is wrong".
+                    "raw": show,
                 }
             )
         url = body.get("next")
