@@ -59,12 +59,30 @@ with st.container(border=True):
         kind, message = result
         (st.success if kind == "ok" else st.error)(message)
 
-    if not spotify_sync.configured(settings):
-        st.caption(
-            "Not configured. Set SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET and "
-            "SPOTIFY_REDIRECT_URI, and register that redirect URI in your app at "
-            "developer.spotify.com/dashboard."
+    missing = spotify_sync.missing_settings(settings)
+    if missing:
+        st.warning(
+            "Not configured — " + ", ".join(f"`{name}`" for name in missing) + " "
+            + ("is" if len(missing) == 1 else "are")
+            + " not reaching the app.",
+            icon=":material/key_off:",
         )
+        st.caption(
+            "Set these in Streamlit secrets when deployed, or `.env` locally. If you've just "
+            "added one and it still shows here, the container is running on an older secrets "
+            "snapshot — reboot it from Manage app. Check the spelling too: it's "
+            "`SPOTIFY_REDIRECT_URI`, not `..._URL`."
+        )
+        # Whatever *did* arrive is worth showing, so a value that's present
+        # but wrong can be spotted without another round trip. The redirect
+        # URI is a public URL, so there's nothing to leak by printing it; the
+        # client id and secret are only ever reported as set or not.
+        arrived = [
+            f"SPOTIFY_CLIENT_ID: {'set' if settings.spotify_client_id else 'missing'}",
+            f"SPOTIFY_CLIENT_SECRET: {'set' if settings.spotify_client_secret else 'missing'}",
+            f"SPOTIFY_REDIRECT_URI: {settings.spotify_redirect_uri or 'missing'}",
+        ]
+        st.caption("Seen by the app right now — " + " · ".join(arrived))
     else:
         spotify = spotify_sync.connection(library.store)
         if not spotify:
@@ -88,6 +106,14 @@ with st.container(border=True):
             if authorize_url:
                 st.link_button("Continue to Spotify", authorize_url, type="primary")
                 st.caption("Opens Spotify's consent screen, then returns you here.")
+                # Spotify matches this as an exact string and reports a
+                # mismatch only as "INVALID_CLIENT: Invalid redirect URI", so
+                # print what's being sent for comparison with the dashboard.
+                st.caption(
+                    f"Sending redirect_uri `{settings.spotify_redirect_uri}` — this must appear "
+                    "character for character in your app's Redirect URIs at "
+                    "developer.spotify.com/dashboard."
+                )
         else:
             st.caption(f"Connected {spotify.get('connected_at', 'at an unknown time')}.")
             with st.container(horizontal=True, vertical_alignment="center"):

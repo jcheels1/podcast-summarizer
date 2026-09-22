@@ -53,15 +53,27 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def missing_settings(settings) -> list[str]:
+    """Which of the three required settings aren't set, by name.
+
+    Named individually rather than as one "not configured" verdict: on a
+    deployed app the usual causes are a mistyped key (SPOTIFY_REDIRECT_URL
+    for ..._URI) or a secrets snapshot the container hasn't picked up yet,
+    and knowing which value is missing separates those immediately.
+    """
+    required = {
+        "SPOTIFY_CLIENT_ID": settings.spotify_client_id,
+        "SPOTIFY_CLIENT_SECRET": settings.spotify_client_secret,
+        "SPOTIFY_REDIRECT_URI": settings.spotify_redirect_uri,
+    }
+    return [name for name, value in required.items() if not value]
+
+
 def configured(settings) -> bool:
     """Whether the OAuth flow can even be started. The redirect URI has to be
     registered in Spotify's dashboard, so it is configuration rather than
     something the app can derive."""
-    return bool(
-        settings.spotify_client_id
-        and settings.spotify_client_secret
-        and settings.spotify_redirect_uri
-    )
+    return not missing_settings(settings)
 
 
 # --- connecting ---------------------------------------------------------------
