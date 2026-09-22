@@ -8,12 +8,23 @@ from __future__ import annotations
 
 import streamlit as st
 
+import startup_diagnostics
+
+# Either side of the app's own imports, so a silent death (an OOM kill
+# leaves no traceback) still leaves a record of how far startup got and
+# what it had loaded. See startup_diagnostics.py.
+startup_diagnostics.report("before app imports")
+
 import ui
 from config import claude_subscription_available, ffmpeg_available, load_settings
+
+startup_diagnostics.report("after app imports")
 
 st.set_page_config(page_title="Podcast Summarizer", page_icon=":material/podcasts:", layout="wide")
 
 settings = load_settings()
+
+startup_diagnostics.report("settings loaded")
 
 if settings.app_password and not st.session_state.get("authenticated"):
     st.title("Podcast Summarizer")
