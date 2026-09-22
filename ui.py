@@ -374,9 +374,8 @@ def render_outputs(episode: Episode, library: Library, settings) -> None:
             st.markdown(header_markdown(header))
             if speaker_list:
                 st.caption("Speakers: " + ", ".join(speaker_list))
-            st.divider()
-            preview = transcript.text_for_summarization()
-            st.text(preview[:3000] + ("..." if len(preview) > 3000 else ""))
+            # Above the preview: the transcript runs to thousands of words,
+            # and the export was underneath all of them.
             st.download_button(
                 "Download transcript PDF",
                 data=pdf_export.build_transcript_pdf(transcript.segments, header),
@@ -385,6 +384,9 @@ def render_outputs(episode: Episode, library: Library, settings) -> None:
                 icon=":material/download:",
                 key=f"dl_tx_{episode.key}",
             )
+            st.divider()
+            preview = transcript.text_for_summarization()
+            st.text(preview[:3000] + ("..." if len(preview) > 3000 else ""))
 
 
 def _render_summary(episode: Episode, library: Library, settings, header) -> None:
@@ -393,6 +395,15 @@ def _render_summary(episode: Episode, library: Library, settings, header) -> Non
     filing away for one of them."""
     topics = library.load_summary(episode.key)
     st.markdown(header_markdown(header))
+
+    # The exports render here, above the summary itself, so saving a PDF
+    # doesn't mean scrolling past every topic first. They can't simply be
+    # moved up in the code — the PDF holds whichever topics are ticked, and
+    # those checkboxes are created below. So claim the space now and fill it
+    # once the selection exists; Streamlit places the widgets where the
+    # container sits, not where they were created.
+    actions = st.container()
+
     st.divider()
 
     selected = []
@@ -407,48 +418,49 @@ def _render_summary(episode: Episode, library: Library, settings, header) -> Non
             selected.append(topic)
         st.write(topic.body)
 
-    single_page = st.checkbox(
-        "Push to Notion as one combined page",
-        value=False,
-        key=f"one_page_{episode.key}",
-        help="Default is one Notion page per topic.",
-    )
-
-    with st.container(horizontal=True, gap="small"):
-        st.download_button(
-            "Summary PDF",
-            data=pdf_export.build_summary_pdf(selected or topics, header),
-            file_name=f"{_safe_name(episode.title)} - summary.pdf",
-            mime="application/pdf",
-            icon=":material/download:",
-            key=f"dl_sm_{episode.key}",
-            disabled=not selected,
+    with actions:
+        single_page = st.checkbox(
+            "Push to Notion as one combined page",
+            value=False,
+            key=f"one_page_{episode.key}",
+            help="Default is one Notion page per topic.",
         )
-        if settings.notion_configured:
-            if st.button(
-                "Push to Notion",
-                icon=":material/upload:",
-                key=f"notion_{episode.key}",
-                disabled=not selected,
-            ):
-                _push_to_notion(episode, selected, settings, single_page)
-        if st.button(
-            "Regenerate",
-            icon=":material/refresh:",
-            key=f"regen_{episode.key}",
-            help="Summarize the saved transcript again with the current provider.",
-        ):
-            with st.spinner("Summarizing again..."):
-                jobs.regenerate_summary(
-                    episode,
-                    settings=settings,
-                    summary_config=st.session_state.summary_config,
-                    library=library,
-                )
-            st.rerun()
 
-    if not settings.notion_configured:
-        st.caption("Set NOTION_TOKEN and NOTION_DATABASE_ID in `.env` to enable the Notion push.")
+        with st.container(horizontal=True, gap="small"):
+            st.download_button(
+                "Summary PDF",
+                data=pdf_export.build_summary_pdf(selected or topics, header),
+                file_name=f"{_safe_name(episode.title)} - summary.pdf",
+                mime="application/pdf",
+                icon=":material/download:",
+                key=f"dl_sm_{episode.key}",
+                disabled=not selected,
+            )
+            if settings.notion_configured:
+                if st.button(
+                    "Push to Notion",
+                    icon=":material/upload:",
+                    key=f"notion_{episode.key}",
+                    disabled=not selected,
+                ):
+                    _push_to_notion(episode, selected, settings, single_page)
+            if st.button(
+                "Regenerate",
+                icon=":material/refresh:",
+                key=f"regen_{episode.key}",
+                help="Summarize the saved transcript again with the current provider.",
+            ):
+                with st.spinner("Summarizing again..."):
+                    jobs.regenerate_summary(
+                        episode,
+                        settings=settings,
+                        summary_config=st.session_state.summary_config,
+                        library=library,
+                    )
+                st.rerun()
+
+        if not settings.notion_configured:
+            st.caption("Set NOTION_TOKEN and NOTION_DATABASE_ID in `.env` to enable the Notion push.")
 
 
 def _push_to_notion(episode: Episode, topics: list, settings, single_page: bool) -> None:
