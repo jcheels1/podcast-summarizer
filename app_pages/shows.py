@@ -72,16 +72,20 @@ def render_spotify_matching(spotify_shows: list[dict]) -> None:
         # merely dropped in our mapping.
         st.json(spotify_shows[0].get("raw", {}), expanded=False)
 
-    names = [s["name"] for s in spotify_shows]
+    # Sorted and empty by default: an arbitrary "first N" default invites
+    # looking up shows you didn't choose, and the list is long enough that
+    # finding a specific one means typing to filter.
+    names = sorted((s["name"] for s in spotify_shows), key=str.lower)
     chosen_names = st.multiselect(
         "Shows to look up",
         names,
-        default=names[:MATCH_BATCH_DEFAULT],
         help=(
-            "Each one costs a search against Apple's directory, which is rate limited, so "
-            "start with a batch rather than all of them."
+            f"Type to filter. Each one costs a search against Apple's directory, which is rate "
+            f"limited, so try {MATCH_BATCH_DEFAULT} or so at a time rather than all of them."
         ),
     )
+    if not chosen_names:
+        st.caption(f"Pick some shows above — {MATCH_BATCH_DEFAULT} or fewer to start.")
 
     if st.button("Find feeds", icon=":material/search:", disabled=not chosen_names):
         selected = [s for s in spotify_shows if s["name"] in chosen_names]

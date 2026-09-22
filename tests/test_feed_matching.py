@@ -199,6 +199,15 @@ broke = fm.match_show({"name": "Odd Lots"}, search=boom)
 check("search failure -> none, not a crash", broke.verdict == "none", broke.verdict)
 check("search failure names the error", "ConnectionError" in broke.reason, broke.reason)
 
+def refused(term, limit=None):
+    raise fm.SearchUnavailable("Apple's directory returned 403 for 'Odd Lots' — it often refuses requests from hosted servers.")
+
+
+denied = fm.match_show({"name": "Odd Lots"}, search=refused)
+check("directory refusal -> none", denied.verdict == "none", denied.verdict)
+check("refusal reported verbatim, not as 'no such podcast'", "403" in denied.reason, denied.reason)
+check("refusal distinguished from absence", "exclusive" not in denied.reason.lower(), denied.reason)
+
 private = fm.match_show({"name": "Stratechery"}, search=fake_search)
 check("private feed short-circuits before searching", private.verdict == "none" and not private.candidates)
 check("private reason explains why", "subscriber" in private.reason.lower(), private.reason)

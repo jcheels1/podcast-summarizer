@@ -53,6 +53,11 @@ THROTTLE_SECONDS = 0.4
 
 SEARCH_LIMIT = 8
 
+
+class SearchUnavailable(Exception):
+    """The directory couldn't be asked, as opposed to having no answer."""
+
+
 # Shows whose feeds are private by nature. Matching these against a public
 # directory can only produce a wrong answer, so they're refused outright.
 # Matched against the normalized name.
@@ -219,15 +224,34 @@ def score_candidate(show_name: str, candidate: Candidate, spotify_episodes: int 
 def search_candidates(term: str, limit: int = SEARCH_LIMIT) -> list[Candidate]:
     """Ask Apple's directory for shows matching a name.
 
-    Raises requests exceptions to the caller — a network failure for one
-    show shouldn't be mistaken for "no such podcast".
+    Raises on failure rather than returning nothing, so "Apple refused us"
+    is never reported to the user as "no such podcast".
+
+    The User-Agent matters: Apple's search API is unauthenticated and
+    answers datacenter IPs far less willingly than home connections,
+    and a default ``python-requests/x.y`` agent is the first thing it
+    turns away. This is the same host the manual "follow by name" path
+    uses, so the header helps both.
     """
     resp = requests.get(
         ITUNES_SEARCH,
         params={"term": term, "entity": "podcast", "limit": limit},
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/125.0 Safari/537.36"
+            ),
+            "Accept": "application/json",
+        },
         timeout=REQUEST_TIMEOUT,
     )
-    resp.raise_for_status()
+    if resp.status_code != 200:
+        # Name the status explicitly: a 403 here means Apple declined the
+        # caller, which needs a different fix from a 5xx or a timeout.
+        raise SearchUnavailable(
+            f"Apple's directory returned {resp.status_code} for {term!r}"
+            + (" — it often refuses requests from hosted servers." if resp.status_code == 403 else "")
+        )
     candidates = []
     for result in resp.json().get("results", []):
         if not result.get("feedUrl"):
@@ -267,8 +291,14 @@ def match_show(show: dict, search=search_candidates) -> Match:
 
     try:
         found = search(name)
+    except SearchUnavailable as e:
+        return Match(show=show, verdict="none", reason=str(e))
     except Exception as e:  # noqa: BLE001 - surfaced as a reason, not a crash
-        return Match(show=show, verdict="none", reason=f"Search failed ({type(e).__name__}: {e}).")
+        return Match(
+            show=show,
+            verdict="none",
+            reason=f"Couldn't reach Apple's directory ({type(e).__name__}: {e}).",
+        )
 
     if not found:
         return Match(
