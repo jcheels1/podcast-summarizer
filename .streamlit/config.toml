@@ -1,27 +1,30 @@
 # Settings that apply wherever this app runs, deployment included.
 
 [server]
-# No file watching by default, and specifically not module reloading.
+# Poll file modification times, and reload local modules when they change.
 #
-# Hot-reloading a changed module means removing it from sys.modules and
-# re-importing it. On Python 3.14 that is not survivable here: dataclasses
-# resolves the string annotations produced by `from __future__ import
-# annotations` via
+# Two separate reasons, one per environment:
 #
-#     sys.modules.get(cls.__module__).__dict__
+# Locally, this project lives on a Google Drive virtual drive, which does not
+# emit the OS-level change notifications the default watchdog watcher listens
+# for. With the watcher deaf, an edited module stays in sys.modules and the
+# server has to be restarted by hand after every change.
 #
-# with no None check, so a @dataclass whose module is mid-reload dies with
-# "AttributeError: 'NoneType' object has no attribute '__dict__'". jobs.py
-# and feeds.py both hit this, which takes the whole app down with
-# Streamlit's "Oh no." page and a traceback only visible in the deploy logs.
+# On Streamlit Community Cloud, pushing shows "Updated app!" and re-executes
+# app.py and the app_pages/ scripts — but does NOT re-import modules. So a
+# change to ui.py or spotify_sync.py left new callers running against old
+# modules, surfacing as an AttributeError or TypeError naming a function
+# plainly present in the file, and needing a manual reboot every time.
 #
-# Nothing is lost on a deployed app: pushing to the branch redeploys it, so
-# there is nothing for a watcher to notice.
+# This was previously set to "none" because reloading a module crashed the
+# whole app: dataclasses resolved the string annotations from
+# `from __future__ import annotations` via sys.modules, which is empty for a
+# module mid-reload. That import is now gone from every module defining a
+# dataclass, and tests/test_module_reload.py fails if it returns or if any
+# of those modules stops surviving a reload — so the reason for "none" no
+# longer holds.
 #
-# Local development does want watching, because this project lives on a
-# Google Drive virtual drive whose filesystem events Streamlit never sees —
-# without a watcher an edited module stays stale until the server is
-# restarted by hand. "Launch Podcast Summarizer.bat" passes
-# --server.fileWatcherType poll for that, so the reload behaviour is opted
-# into locally rather than shipped to the server.
-fileWatcherType = "none"
+# If module reloading ever does destabilise the deployed app, setting this
+# back to "none" restores the old behaviour at the cost of a reboot after
+# every change to an imported module.
+fileWatcherType = "poll"

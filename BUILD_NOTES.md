@@ -374,12 +374,14 @@ edited; the module that *had* changed was elsewhere in the import graph.
 
 Two separate things guard against it now:
 
-- `.streamlit/config.toml` sets `fileWatcherType = "none"`, so the deployed
-  app never reloads modules. Local development opts back into polling
-  through `Launch Podcast Summarizer.bat`, because this project lives on a
-  Google Drive virtual drive that emits no filesystem events, and without a
-  watcher an edited module stays stale until the server is restarted by
-  hand.
+- `tests/test_module_reload.py` is what makes module reloading safe to
+  leave on. `.streamlit/config.toml` sets `fileWatcherType = "poll"` in both
+  environments: locally because Google Drive emits no filesystem events, and
+  on the deployed app because pushing re-executes the page scripts but does
+  *not* re-import modules — so a change to an imported module left new
+  callers running against old code until someone rebooted by hand. If
+  reloading ever destabilises the server, `"none"` restores the old
+  behaviour at the cost of that manual reboot.
 - `tests/test_module_reload.py` executes each of those modules' source in a
   namespace that is deliberately *not* registered in `sys.modules`, which is
   exactly the failing condition, and separately fails if the import is ever
