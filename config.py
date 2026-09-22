@@ -94,6 +94,90 @@ def ffmpeg_available() -> bool:
     return shutil.which("ffmpeg") is not None
 
 
+# Loading faster-whisper's `small` model and holding an hour of decoded audio
+# needs well over a gigabyte. Below this there is no point offering local
+# transcription: the process is killed mid-run, which takes the whole app
+# with it rather than producing an error anyone can act on.
+MIN_LOCAL_TRANSCRIPTION_MB = 2048
+
+
+def available_memory_mb() -> int | None:
+    """Total memory this process may use, in MB, or None if undeterminable.
+
+    Reads the cgroup limit before ``/proc/meminfo``, because inside a
+    container the latter reports the *host's* memory — on a hosted app that
+    reads as tens of gigabytes while the real ceiling is about one, which is
+    exactly the wrong answer for deciding whether local transcription fits.
+    """
+    for path in ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
+        try:
+            with open(path) as handle:
+                raw = handle.read().strip()
+        except OSError:
+            continue
+        if raw == "max":
+            break  # no cgroup ceiling; fall through to the host's own total
+        try:
+            value = int(raw)
+        except ValueError:
+            continue
+        # cgroup v1 writes a sentinel near 2**63 to mean "unlimited".
+        if value < (1 << 62):
+            return value // (1024 * 1024)
+
+    try:
+        with open("/proc/meminfo") as handle:
+            for line in handle:
+                if line.startswith("MemTotal:"):
+                    return int(line.split()[1]) // 1024
+    except OSError:
+        pass
+
+    try:  # Windows
+        import ctypes
+
+        class MemoryStatus(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", ctypes.c_ulong),
+                ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        status = MemoryStatus()
+        status.dwLength = ctypes.sizeof(MemoryStatus)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return int(status.ullTotalPhys) // (1024 * 1024)
+    except Exception:  # noqa: BLE001 - it's only an optimisation
+        pass
+
+    return None
+
+
+def local_transcription_viable() -> tuple[bool, str]:
+    """Whether transcribing on this machine can be expected to finish.
+
+    Returns (viable, reason). Unknown memory counts as viable — the check
+    exists to steer away from a known-bad configuration, not to block a
+    machine it can't measure.
+    """
+    memory = available_memory_mb()
+    if memory is None:
+        return True, ""
+    if memory < MIN_LOCAL_TRANSCRIPTION_MB:
+        return False, (
+            f"This server has about {memory} MB of memory. Local transcription needs roughly "
+            f"{MIN_LOCAL_TRANSCRIPTION_MB} MB to load the Whisper model and decode an episode, "
+            "and running out kills the whole app rather than failing cleanly."
+        )
+    return True, ""
+
+
 def claude_subscription_available() -> bool:
     """Whether summarization can run on a Claude Pro/Max subscription instead
     of an API key.

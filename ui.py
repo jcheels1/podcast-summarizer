@@ -13,7 +13,7 @@ import pdf_export
 import speakers
 import spotify_sync
 import summarizer
-from config import load_settings
+from config import load_settings, local_transcription_viable
 from feeds import Episode
 from library import Library
 from notion_export import push_topic
@@ -33,7 +33,12 @@ TRANSCRIPTION_PROVIDERS = {
 def init_state(summary_providers: list[str]) -> None:
     """One place where every session-state key is created."""
     st.session_state.setdefault("summary_config", {"provider": summary_providers[0], "model": None})
-    st.session_state.setdefault("transcribe_config", {"provider": "local", "model": "small", "api_key": None})
+    # The sidebar overwrites this every run; it only has to be safe for the
+    # first one, before any widget exists.
+    st.session_state.setdefault(
+        "transcribe_config",
+        {"provider": "local" if local_transcription_viable()[0] else "groq", "model": "small", "api_key": None},
+    )
     st.session_state.setdefault("name_speakers", True)
     st.session_state.setdefault("auto_blurbs", True)
     st.session_state.setdefault("job", None)
@@ -141,11 +146,18 @@ def settings_sidebar(settings, summary_providers: list[str]) -> None:
     """Processing settings, shared by every page."""
     with st.sidebar.expander("Processing settings", icon=":material/tune:"):
         st.caption("Transcription")
-        options = ["local"]
+        # Order decides the default, since the selectbox takes the first
+        # option. Local is preferred when it can actually run — it's free —
+        # but on a small hosted container it exhausts memory mid-episode and
+        # the process is killed, which shows up as Streamlit's "Oh no." page
+        # with the whole app gone. So there, a cloud provider goes first.
+        local_ok, local_reason = local_transcription_viable()
+        cloud = []
         if settings.groq_configured:
-            options.append("groq")
+            cloud.append("groq")
         if settings.gemini_configured:
-            options.append("gemini")
+            cloud.append("gemini")
+        options = (["local"] + cloud) if (local_ok or not cloud) else (cloud + ["local"])
 
         provider = st.selectbox(
             "Transcription provider",
@@ -169,7 +181,13 @@ def settings_sidebar(settings, summary_providers: list[str]) -> None:
                 key="local_model",
             )
             api_key = None
-            st.caption("Runs on this machine — free, but slower than real time on CPU.")
+            if local_ok:
+                st.caption("Runs on this machine — free, but slower than real time on CPU.")
+            else:
+                st.warning(
+                    local_reason + " Pick Groq or Gemini here instead.",
+                    icon=":material/memory_alt:",
+                )
 
         st.session_state.transcribe_config = {"provider": provider, "model": model, "api_key": api_key}
 
