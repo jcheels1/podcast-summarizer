@@ -1,16 +1,27 @@
-# Local Streamlit settings.
+# Settings that apply wherever this app runs, deployment included.
 
 [server]
-# Poll file modification times instead of subscribing to filesystem events.
+# No file watching by default, and specifically not module reloading.
 #
-# This project lives on a Google Drive virtual drive (G:\My Drive\...), which
-# does not emit the OS-level change notifications the default watchdog
-# watcher listens for. With the watcher deaf, Streamlit never notices an
-# edited module and keeps the stale one in sys.modules — so a rerun
-# re-executes app.py and the app_pages/ scripts against an out-of-date ui.py
-# or stores.py. That shows up as a baffling AttributeError or TypeError
-# naming a function you can see is right there in the file, and the only cure
-# is restarting the server by hand.
+# Hot-reloading a changed module means removing it from sys.modules and
+# re-importing it. On Python 3.14 that is not survivable here: dataclasses
+# resolves the string annotations produced by `from __future__ import
+# annotations` via
 #
-# Polling costs a little idle CPU and fixes that. Harmless on a normal disk.
-fileWatcherType = "poll"
+#     sys.modules.get(cls.__module__).__dict__
+#
+# with no None check, so a @dataclass whose module is mid-reload dies with
+# "AttributeError: 'NoneType' object has no attribute '__dict__'". jobs.py
+# and feeds.py both hit this, which takes the whole app down with
+# Streamlit's "Oh no." page and a traceback only visible in the deploy logs.
+#
+# Nothing is lost on a deployed app: pushing to the branch redeploys it, so
+# there is nothing for a watcher to notice.
+#
+# Local development does want watching, because this project lives on a
+# Google Drive virtual drive whose filesystem events Streamlit never sees —
+# without a watcher an edited module stays stale until the server is
+# restarted by hand. "Launch Podcast Summarizer.bat" passes
+# --server.fileWatcherType poll for that, so the reload behaviour is opted
+# into locally rather than shipped to the server.
+fileWatcherType = "none"
