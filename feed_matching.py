@@ -29,10 +29,9 @@ import time
 import unicodedata
 from dataclasses import dataclass, field
 
-import requests
 from rapidfuzz import fuzz
 
-from feeds import ITUNES_SEARCH, REQUEST_TIMEOUT
+import directory
 
 # Verdict thresholds, on rapidfuzz's 0-100 scale.
 #
@@ -54,8 +53,10 @@ THROTTLE_SECONDS = 0.4
 SEARCH_LIMIT = 8
 
 
-class SearchUnavailable(Exception):
-    """The directory couldn't be asked, as opposed to having no answer."""
+# Re-exported so callers catch one name regardless of which directory
+# answered. directory.py owns the distinction between "couldn't ask" and
+# "asked, nothing there".
+SearchUnavailable = directory.DirectoryUnavailable
 
 
 # Shows whose feeds are private by nature. Matching these against a public
@@ -221,60 +222,36 @@ def score_candidate(show_name: str, candidate: Candidate, spotify_episodes: int 
     return int(round(max(0.0, min(100.0, score))))
 
 
-def search_candidates(term: str, limit: int = SEARCH_LIMIT) -> list[Candidate]:
-    """Ask Apple's directory for shows matching a name.
+def search_candidates(term: str, settings, limit: int = SEARCH_LIMIT) -> list[Candidate]:
+    """Ask the configured directory for shows matching a name.
 
-    Raises on failure rather than returning nothing, so "Apple refused us"
-    is never reported to the user as "no such podcast".
-
-    The User-Agent matters: Apple's search API is unauthenticated and
-    answers datacenter IPs far less willingly than home connections,
-    and a default ``python-requests/x.y`` agent is the first thing it
-    turns away. This is the same host the manual "follow by name" path
-    uses, so the header helps both.
+    Raises DirectoryUnavailable on refusal rather than returning nothing, so
+    a rate-limited directory is never reported to the user as "no such
+    podcast" — which is exactly what happened when Apple started answering
+    403 to every search from the deployed app.
     """
-    resp = requests.get(
-        ITUNES_SEARCH,
-        params={"term": term, "entity": "podcast", "limit": limit},
-        headers={
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/125.0 Safari/537.36"
-            ),
-            "Accept": "application/json",
-        },
-        timeout=REQUEST_TIMEOUT,
-    )
-    if resp.status_code != 200:
-        # Name the status explicitly: a 403 here means Apple declined the
-        # caller, which needs a different fix from a 5xx or a timeout.
-        raise SearchUnavailable(
-            f"Apple's directory returned {resp.status_code} for {term!r}"
-            + (" — it often refuses requests from hosted servers." if resp.status_code == 403 else "")
+    return [
+        Candidate(
+            feed_url=row["feed_url"],
+            name=row["name"],
+            artist=row["artist"],
+            episode_count=row["episode_count"],
+            image_url=row["image_url"],
         )
-    candidates = []
-    for result in resp.json().get("results", []):
-        if not result.get("feedUrl"):
-            # Apple lists plenty of shows with no public feed; they're
-            # useless here even if the name matches perfectly.
-            continue
-        candidates.append(
-            Candidate(
-                feed_url=result["feedUrl"],
-                name=result.get("collectionName", ""),
-                artist=result.get("artistName", ""),
-                episode_count=result.get("trackCount"),
-                image_url=result.get("artworkUrl600") or result.get("artworkUrl100") or "",
-            )
-        )
-    return candidates
+        for row in directory.search_shows(term, settings, limit=limit)
+    ]
 
 
-def match_show(show: dict, search=search_candidates) -> Match:
+def match_show(show: dict, settings=None, search=None) -> Match:
     """Find the RSS feed for one followed Spotify show.
 
-    ``search`` is injectable so this can be exercised without a network.
+    ``search`` is injectable so this can be exercised without a network;
+    it is called with the show name alone.
     """
+    if search is None:
+        def search(term):
+            return search_candidates(term, settings)
+
     name = (show.get("name") or "").strip()
     if not name:
         return Match(show=show, verdict="none", reason="This show has no name to search on.")
@@ -353,7 +330,7 @@ def match_show(show: dict, search=search_candidates) -> Match:
     return Match(show=show, candidates=found, verdict=verdict, reason=reason)
 
 
-def match_shows(shows: list[dict], search=search_candidates, progress=None) -> list[Match]:
+def match_shows(shows: list[dict], settings=None, search=None, progress=None) -> list[Match]:
     """Match several shows, pacing the requests.
 
     ``progress(done, total, name)`` is called as it goes, so a slow run can
@@ -364,7 +341,7 @@ def match_shows(shows: list[dict], search=search_candidates, progress=None) -> l
     for index, show in enumerate(shows, start=1):
         if progress:
             progress(index, total, (show.get("name") or "").strip())
-        matches.append(match_show(show, search=search))
+        matches.append(match_show(show, settings=settings, search=search))
         if index < total:
             time.sleep(THROTTLE_SECONDS)
     return matches

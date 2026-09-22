@@ -20,6 +20,7 @@ from urllib.parse import urlparse
 import feedparser
 import requests
 
+import directory
 from speakers import extract_person_names, strip_html
 
 ITUNES_LOOKUP = "https://itunes.apple.com/lookup"
@@ -87,26 +88,28 @@ class Feed:
 
 
 def _itunes_feed_url(collection_id: str) -> tuple[str, str]:
-    resp = requests.get(ITUNES_LOOKUP, params={"id": collection_id}, timeout=REQUEST_TIMEOUT)
-    resp.raise_for_status()
-    results = resp.json().get("results", [])
-    result = next((r for r in results if r.get("feedUrl")), None)
-    if not result:
-        raise FeedError("Apple Podcasts has no public RSS feed listed for that show.")
-    return result["feedUrl"], result.get("collectionName", "")
+    try:
+        return directory.itunes_feed_url(collection_id)
+    except directory.DirectoryUnavailable as e:
+        raise FeedError(str(e)) from e
 
 
 def _search_by_name(term: str) -> tuple[str, str]:
-    resp = requests.get(
-        ITUNES_SEARCH,
-        params={"term": term, "entity": "podcast", "limit": 5},
-        timeout=REQUEST_TIMEOUT,
-    )
-    resp.raise_for_status()
-    results = [r for r in resp.json().get("results", []) if r.get("feedUrl")]
+    """First directory hit for a name.
+
+    Deliberately reports "the directory wouldn't answer" separately from
+    "no such podcast": the two need opposite responses, and conflating them
+    told a user their real, listed podcasts didn't exist. See directory.py.
+    """
+    from config import load_settings
+
+    try:
+        results = directory.search_shows(term, load_settings(), limit=5)
+    except directory.DirectoryUnavailable as e:
+        raise FeedError(str(e)) from e
     if not results:
         raise FeedError(f"Couldn't find a podcast called {term!r}. Try pasting its RSS feed URL instead.")
-    return results[0]["feedUrl"], results[0].get("collectionName", "")
+    return results[0]["feed_url"], results[0]["name"]
 
 
 def discover_feed_url(entry: str) -> str:

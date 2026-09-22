@@ -95,7 +95,7 @@ def render_spotify_matching(spotify_shows: list[dict]) -> None:
             progress.progress(done / total, text=f"({done}/{total}) {name}")
 
         st.session_state["spotify_matches"] = feed_matching.match_shows(
-            selected, progress=report
+            selected, settings=settings, progress=report
         )
         progress.empty()
 

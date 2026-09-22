@@ -38,6 +38,12 @@ class Settings:
     # Only needed to sync your followed shows; resolving a pasted Spotify
     # link works without it. See spotify_sync.py.
     spotify_redirect_uri: str | None
+    # Podcast Index credentials, used to look a show's name up and find
+    # its RSS feed. Free, no card. Without them the app falls back to
+    # Apple's directory, whose unauthenticated search is rate limited per
+    # IP and so unusable from a hosted server. See directory.py.
+    podcastindex_api_key: str | None
+    podcastindex_api_secret: str | None
     groq_api_key: str | None
     gemini_api_key: str | None
     app_password: str | None
@@ -59,6 +65,10 @@ class Settings:
         return bool(self.gemini_api_key)
 
     @property
+    def podcastindex_configured(self) -> bool:
+        return bool(self.podcastindex_api_key and self.podcastindex_api_secret)
+
+    @property
     def notion_configured(self) -> bool:
         return bool(self.notion_token and self.notion_database_id)
 
@@ -71,6 +81,8 @@ def load_settings() -> Settings:
         spotify_client_id=_get("SPOTIFY_CLIENT_ID"),
         spotify_client_secret=_get("SPOTIFY_CLIENT_SECRET"),
         spotify_redirect_uri=_get("SPOTIFY_REDIRECT_URI"),
+        podcastindex_api_key=_get("PODCASTINDEX_API_KEY"),
+        podcastindex_api_secret=_get("PODCASTINDEX_API_SECRET"),
         groq_api_key=_get("GROQ_API_KEY"),
         gemini_api_key=_get("GEMINI_API_KEY"),
         app_password=_get("APP_PASSWORD"),
