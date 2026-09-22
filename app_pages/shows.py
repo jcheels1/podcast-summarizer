@@ -95,7 +95,7 @@ def render_spotify_matching(spotify_shows: list[dict]) -> None:
             progress.progress(done / total, text=f"({done}/{total}) {name}")
 
         st.session_state["spotify_matches"] = feed_matching.match_shows(
-            selected, settings=settings, progress=report
+            selected, settings=settings, progress=report, verify=True
         )
         progress.empty()
 
@@ -162,7 +162,14 @@ def render_spotify_matching(spotify_shows: list[dict]) -> None:
                 if index < 0:
                     return "Don't follow this one"
                 c = candidates[index]
-                return f"{c.label} · {c.episode_count or '?'} episodes · score {c.score}"
+                bits = [c.label, f"score {c.score}"]
+                if c.episode_count:
+                    bits.insert(1, f"{c.episode_count} episodes")
+                if c.last_episode:
+                    # A long-dead feed is usually the wrong one of two
+                    # sharing a name, so the date earns its place here.
+                    bits.insert(1, f"latest {c.last_episode[:10]}")
+                return " · ".join(bits)
 
             # Options are indices, not Candidate objects: Candidate is a
             # mutable dataclass and so unhashable, which Streamlit's widget
@@ -173,6 +180,9 @@ def render_spotify_matching(spotify_shows: list[dict]) -> None:
                 format_func=describe,
                 key=f"spotify_review_{match.spotify_name}",
             )
+            if candidates and candidates[0].description:
+                st.caption(candidates[0].description[:200])
+
             if picked_index >= 0:
                 picked = candidates[picked_index]
                 if picked.feed_url in followed_urls:

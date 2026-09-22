@@ -70,6 +70,20 @@ PI_BODY = {
     ]
 }
 
+PODVERSE_BODY = [
+    [
+        {
+            "title": "Odd Lots",
+            "feedUrls": [{"url": "https://omny.fm/oddlots.rss"}],
+            "description": "<p>Bloomberg's Joe and Tracy</p>",
+            "lastEpisodePubDate": "2026-09-20T12:00:00.000Z",
+            "shrunkImageUrl": "https://img/small.jpg",
+        },
+        {"title": "No Feed Here", "feedUrls": []},  # no url -> dropped
+    ],
+    2,
+]
+
 ITUNES_BODY = {
     "results": [
         {
@@ -123,38 +137,72 @@ try:
     directory.requests = fake
     check("falls back to ownerName", directory.search_shows("X", Settings())[0]["artist"] == "Owner")
 
-    # --- Podcast Index failures --------------------------------------------
-    print("\n--- Podcast Index failures ---")
-    fake = FakeRequests([Resp(401, {}), Resp(200, ITUNES_BODY)])
+    # --- provider ordering -------------------------------------------------
+    print()
+    print("--- provider ordering ---")
+    unconfigured = Settings(key=None, secret=None)
+
+    fake = FakeRequests([Resp(200, PODVERSE_BODY)])
+    directory.requests = fake
+    rows = directory.search_shows("Odd Lots", unconfigured)
+    check("no key -> Podverse first, not Apple", fake.gets[0]["url"] == directory.PODVERSE_SEARCH, fake.gets[0]["url"])
+    check("Podverse asked with searchTitle", fake.gets[0]["params"]["searchTitle"] == "Odd Lots")
+    check("only one provider called on success", len(fake.gets) == 1, str(len(fake.gets)))
+    check("Podverse feedUrls[0].url mapped", rows[0]["feed_url"] == "https://omny.fm/oddlots.rss")
+    check("Podverse feedless row dropped", len(rows) == 1, str(len(rows)))
+    check("Podverse reports no publisher", rows[0]["artist"] == "")
+    check("Podverse reports no episode count", rows[0]["episode_count"] is None)
+    check("Podverse description de-tagged", rows[0]["description"] == "Bloomberg's Joe and Tracy", rows[0]["description"])
+    check("Podverse last-episode date kept", rows[0]["last_episode"].startswith("2026-09-20"))
+    check("source recorded as podverse", rows[0]["source"] == "podverse")
+
+    # keyed -> Podcast Index wins the ordering
+    fake = FakeRequests([Resp(200, PI_BODY)])
+    directory.requests = fake
+    directory.search_shows("Odd Lots", Settings())
+    check("key present -> Podcast Index first", fake.gets[0]["url"] == directory.PODCASTINDEX_SEARCH)
+
+    # --- falling through ---------------------------------------------------
+    print()
+    print("--- falling through ---")
+    fake = FakeRequests([Resp(401, {}), Resp(200, PODVERSE_BODY)])
     directory.requests = fake
     rows = directory.search_shows("Odd Lots", Settings())
-    check("401 falls back to Apple", rows and rows[0]["source"] == "itunes", str(rows))
+    check("Podcast Index 401 falls through to Podverse", rows[0]["source"] == "podverse", str(rows[:1]))
 
-    # both fail -> the configured provider's error is what surfaces
-    fake = FakeRequests([Resp(401, {}), Resp(403, {})])
+    fake = FakeRequests([Resp(500, {}), Resp(200, ITUNES_BODY)])
+    directory.requests = fake
+    rows = directory.search_shows("Odd Lots", unconfigured)
+    check("Podverse failure falls through to Apple", rows[0]["source"] == "itunes", str(rows[:1]))
+
+    # an empty answer is not a failure, but it shouldn't stop the search
+    fake = FakeRequests([Resp(200, [[], 0]), Resp(200, ITUNES_BODY)])
+    directory.requests = fake
+    rows = directory.search_shows("Odd Lots", unconfigured)
+    check("empty Podverse result still tries Apple", rows[0]["source"] == "itunes", str(rows[:1]))
+
+    # nothing anywhere is an empty list, not an error
+    fake = FakeRequests([Resp(200, [[], 0]), Resp(200, {"results": []})])
+    directory.requests = fake
+    check("genuinely absent -> empty list", directory.search_shows("zzz", unconfigured) == [])
+
+    # every provider refusing -> the configured one's error surfaces
+    fake = FakeRequests([Resp(401, {}), Resp(500, {}), Resp(403, {})])
     directory.requests = fake
     try:
         directory.search_shows("Odd Lots", Settings())
-        check("both failing raises", False, "no error")
+        check("all providers failing raises", False, "no error")
     except directory.DirectoryUnavailable as e:
-        check("both failing raises", True)
-        check("reports the configured provider's failure", "Podcast Index" in str(e), str(e))
+        check("all providers failing raises", True)
+        check("names Podcast Index's failure", "Podcast Index" in str(e), str(e))
         check("401 message mentions the clock", "clock" in str(e).lower(), str(e))
+        check("names Podverse's failure too", "Podverse" in str(e), str(e))
+        check("keeps Apple's actionable explanation", "rate limited" in str(e), str(e))
 
-    # --- Apple fallback path -----------------------------------------------
-    print("\n--- Apple fallback ---")
-    unconfigured = Settings(key=None, secret=None)
-    fake = FakeRequests([Resp(200, ITUNES_BODY)])
-    directory.requests = fake
-    rows = directory.search_shows("Odd Lots", unconfigured)
-    check("unconfigured goes straight to Apple", fake.gets[0]["url"] == directory.ITUNES_SEARCH)
-    check("only one request made", len(fake.gets) == 1, str(len(fake.gets)))
-    check("Apple rows mapped", rows[0]["name"] == "Odd Lots" and rows[0]["episode_count"] == 1283)
-    check("feedless Apple result dropped", len(rows) == 1, str(len(rows)))
-    check("browser user agent sent to Apple", "Mozilla" in fake.gets[0]["headers"]["User-Agent"])
-
-    # the 403 that started all this
-    fake = FakeRequests([Resp(403, {})])
+    # --- Apple's 403, the reason any of this exists ------------------------
+    print()
+    print("--- Apple 403 ---")
+    fake = FakeRequests([Resp(500, {}), Resp(403, {})])
     directory.requests = fake
     try:
         directory.search_shows("Odd Lots", unconfigured)
@@ -164,23 +212,17 @@ try:
         check("Apple 403 raises", True)
         check("403 explains rate limiting", "rate limited" in msg, msg)
         check("403 mentions shared hosted IPs", "share addresses" in msg, msg)
-        check("403 points at the fix", "PODCASTINDEX_API_KEY" in msg, msg)
         check("403 is not phrased as a missing podcast", "no such" not in msg.lower(), msg)
 
-    # network error, not a status code
-    fake = FakeRequests([real_requests.ConnectionError("TLS died")])
+    # unconfigured means two providers get tried, so both must fail
+    fake = FakeRequests([real_requests.ConnectionError("TLS died"), real_requests.ConnectionError("TLS died")])
     directory.requests = fake
     try:
-        directory.search_shows("Odd Lots", unconfigured)
+        directory.search_shows("Odd Lots", Settings(key=None, secret=None))
         check("network error raises DirectoryUnavailable", False, "no error")
     except directory.DirectoryUnavailable as e:
         check("network error raises DirectoryUnavailable", True)
         check("network error names the cause", "ConnectionError" in str(e), str(e))
-
-    # empty results are NOT an error — that's a real "not listed"
-    fake = FakeRequests([Resp(200, {"results": []})])
-    directory.requests = fake
-    check("empty result is an empty list, not a raise", directory.search_shows("zzz", unconfigured) == [])
 
     # --- Apple id lookup ---------------------------------------------------
     print("\n--- Apple id lookup ---")

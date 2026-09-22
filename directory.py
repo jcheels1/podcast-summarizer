@@ -1,37 +1,50 @@
 """Turning a podcast's name into its RSS feed URL.
 
 Everything else in this app needs a feed URL to work from, and the only way
-to get one from a name is to ask a directory. This module is that lookup,
-and it exists as its own file because the choice of directory turned out to
-matter more than expected.
+to get one from a name is to ask a directory. This is its own module because
+choosing a directory turned out to be the hard part.
 
 Apple's iTunes Search API was the original answer and is still the richest
-index, but it is unauthenticated and throttled per IP at roughly 20 requests
-a minute, answering with a bare 403 once you're over. On Streamlit Community
-Cloud that is fatal rather than inconvenient: apps there share outbound IPs,
-so the quota is being spent by strangers and a deployed app can arrive
-already exhausted. Every search in a ten-show batch failed that way, while
-the same searches from a browser succeeded immediately.
+index, but it is unauthenticated and rate limited per IP, answering a bare
+403 once you're over. On Streamlit Community Cloud that is fatal rather than
+inconvenient: apps there share outbound addresses, so the quota is spent by
+strangers and a deployed app can arrive already exhausted. Every search in a
+nine-show batch failed that way while the same searches from a browser
+succeeded immediately.
 
-So Podcast Index goes first when it's configured. It's free, asks for no
-card, and — the point — authenticates each request, so the quota is yours
-rather than shared with everyone else on the host. Apple remains as a
-fallback for when no key is set, and keeps the by-id lookup that resolves
-Apple Podcasts links, which costs one request instead of a search and so
-rarely trips anything.
+The alternatives each fail on a different axis, which is why the order below
+is what it is:
+
+* **Podcast Index** — best option, and first when configured. Free, signs
+  each request so the quota is yours. Won't issue keys to free email
+  domains, so not everyone can have one.
+* **Podverse** — the one that always works: no credentials at all, and it
+  found all nine test shows. Thin metadata though, with no publisher and no
+  episode count, so ``feed_matching.probe_feed`` reads the feed itself to
+  recover them.
+* **Apple** — last. Excellent locally, unusable from a hosted server. Still
+  the only one used for Apple Podcasts links, since resolving an id is one
+  lookup rather than a search and so stays inside the limit. That is why
+  pasting an Apple link always worked when name search did not.
+* *Not used:* Listen Notes withholds the RSS url outside its paid plans,
+  which makes its free tier useless here. fyyd needs no key but found four
+  of nine shows and returned a different show entirely for one of them.
 
 Results come back as plain dicts with the same keys whichever provider
 answered: ``feed_url``, ``name``, ``artist``, ``episode_count``,
-``image_url``.
+``image_url``, ``description``, ``last_episode``, ``source``. Providers that
+don't have a field leave it blank rather than guessing.
 """
 from __future__ import annotations
 
 import hashlib
+import re
 import time
 
 import requests
 
 PODCASTINDEX_SEARCH = "https://api.podcastindex.org/api/1.0/search/byterm"
+PODVERSE_SEARCH = "https://api.podverse.fm/api/v1/podcast"
 ITUNES_SEARCH = "https://itunes.apple.com/search"
 ITUNES_LOOKUP = "https://itunes.apple.com/lookup"
 
@@ -112,10 +125,75 @@ def _search_podcastindex(term: str, settings, limit: int) -> list[dict]:
                 "artist": feed.get("author") or feed.get("ownerName") or "",
                 "episode_count": feed.get("episodeCount"),
                 "image_url": feed.get("artwork") or feed.get("image") or "",
+                "description": strip_tags(feed.get("description") or "")[:300],
+                "last_episode": "",
                 "source": "podcastindex",
             }
         )
     return shows
+
+
+def _search_podverse(term: str, limit: int) -> list[dict]:
+    """Podverse's open index — the fallback that needs no credentials at all.
+
+    Chosen because the alternatives all fail on one axis or another for a
+    hosted app: Apple rate limits unauthenticated callers per IP, Podcast
+    Index won't issue keys to free email domains, Listen Notes withholds the
+    RSS url outside its paid plans, and fyyd found four of nine real shows.
+    Podverse asks for nothing and found all nine.
+
+    The trade-off is thin metadata: it returns no publisher and no episode
+    count, which are exactly the two signals that stop a wrong match being
+    confirmed. ``feed_matching.probe_feed`` makes that back by reading the
+    feed itself, which is authoritative anyway.
+    """
+    try:
+        resp = requests.get(
+            PODVERSE_SEARCH,
+            params={"searchTitle": term, "take": limit},
+            headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
+            timeout=REQUEST_TIMEOUT,
+        )
+    except requests.RequestException as e:
+        raise DirectoryUnavailable(f"Couldn't reach Podverse ({type(e).__name__}: {e}).") from e
+
+    if resp.status_code != 200:
+        raise DirectoryUnavailable(f"Podverse returned {resp.status_code} for {term!r}.")
+
+    body = resp.json()
+    # Podverse answers with [rows, total] rather than an object.
+    rows = body[0] if isinstance(body, list) and body and isinstance(body[0], list) else body
+    if not isinstance(rows, list):
+        rows = []
+
+    shows = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        urls = row.get("feedUrls") or []
+        feed_url = next((u.get("url") for u in urls if isinstance(u, dict) and u.get("url")), "")
+        if not feed_url:
+            continue
+        shows.append(
+            {
+                "feed_url": feed_url,
+                "name": row.get("title") or "",
+                # Podverse has no publisher field at all; left blank rather
+                # than guessed at, and filled in later by probing the feed.
+                "artist": "",
+                "episode_count": None,
+                "image_url": row.get("shrunkImageUrl") or row.get("imageUrl") or "",
+                "description": strip_tags(row.get("description") or "")[:300],
+                "last_episode": row.get("lastEpisodePubDate") or "",
+                "source": "podverse",
+            }
+        )
+    return shows
+
+
+def strip_tags(text: str) -> str:
+    """Crude tag removal for a description shown as one line of plain text."""
+    return re.sub(r"<[^>]+>", " ", text).replace("&nbsp;", " ").strip()
 
 
 def _search_itunes(term: str, limit: int) -> list[dict]:
@@ -151,6 +229,8 @@ def _search_itunes(term: str, limit: int) -> list[dict]:
                 "artist": result.get("artistName", ""),
                 "episode_count": result.get("trackCount"),
                 "image_url": result.get("artworkUrl600") or result.get("artworkUrl100") or "",
+                "description": "",
+                "last_episode": result.get("releaseDate") or "",
                 "source": "itunes",
             }
         )
@@ -158,24 +238,41 @@ def _search_itunes(term: str, limit: int) -> list[dict]:
 
 
 def search_shows(term: str, settings, limit: int = 8) -> list[dict]:
-    """Shows matching ``term``, best first, from whichever directory answers.
+    """Shows matching ``term``, from the first provider that answers.
 
-    Podcast Index first when configured; Apple otherwise, or if Podcast
-    Index fails. If both are unavailable the *first* failure is raised,
-    since that's the provider the user configured and expects to work.
+    Order is deliberate. Podcast Index goes first when a key is set: it has
+    the richest metadata and an authenticated quota. Podverse is next and is
+    the one that always works, needing no credentials. Apple is last —
+    excellent locally, useless from a hosted server whose shared IP has
+    already spent the unauthenticated quota.
+
+    An empty answer is not a failure, but it isn't the end either: the next
+    provider still gets asked, because one index missing a show says
+    nothing about the others.
+
+    If every provider fails, all their failures are reported together. Each
+    tends to fail for its own unrelated reason, and picking one to show
+    hides the one that explains what to do about it.
     """
-    first_error: DirectoryUnavailable | None = None
-
+    providers: list[tuple[str, object]] = []
     if podcastindex_configured(settings):
-        try:
-            return _search_podcastindex(term, settings, limit)
-        except DirectoryUnavailable as e:
-            first_error = e
+        providers.append(("Podcast Index", lambda: _search_podcastindex(term, settings, limit)))
+    providers.append(("Podverse", lambda: _search_podverse(term, limit)))
+    providers.append(("Apple", lambda: _search_itunes(term, limit)))
 
-    try:
-        return _search_itunes(term, limit)
-    except DirectoryUnavailable as e:
-        raise (first_error or e) from e
+    failures = []
+    for name, provider in providers:
+        try:
+            found = provider()
+        except DirectoryUnavailable as e:
+            failures.append(str(e))
+            continue
+        if found:
+            return found
+
+    if len(failures) == len(providers):
+        raise DirectoryUnavailable("No podcast directory could be reached. " + " ".join(failures))
+    return []
 
 
 def itunes_feed_url(collection_id: str) -> tuple[str, str]:

@@ -139,7 +139,11 @@ class Candidate:
     artist: str = ""
     episode_count: int | None = None
     image_url: str = ""
+    description: str = ""
+    last_episode: str = ""
     score: int = 0
+    # Set once the feed itself has been read; see probe_feed.
+    probed: bool = False
 
     @property
     def label(self) -> str:
@@ -237,12 +241,45 @@ def search_candidates(term: str, settings, limit: int = SEARCH_LIMIT) -> list[Ca
             artist=row["artist"],
             episode_count=row["episode_count"],
             image_url=row["image_url"],
+            description=row.get("description", ""),
+            last_episode=row.get("last_episode", ""),
         )
         for row in directory.search_shows(term, settings, limit=limit)
     ]
 
 
-def match_show(show: dict, settings=None, search=None) -> Match:
+def probe_feed(feed_url: str) -> dict:
+    """Read a candidate's own feed for the truth about it.
+
+    Directories disagree about metadata and some carry almost none —
+    Podverse returns neither a publisher nor an episode count, which are the
+    two things that keep a name-only match honest. The feed itself has both,
+    is authoritative, and costs no API quota. So for the candidate we're
+    about to recommend, we ask the source.
+
+    Returns ``{}`` rather than raising: a feed that won't parse is a reason
+    to trust the match less, not a reason to abandon the whole run.
+    """
+    import feedparser
+
+    try:
+        parsed = feedparser.parse(feed_url)
+    except Exception:  # noqa: BLE001 - treated as "no extra information"
+        return {}
+    if not parsed.entries:
+        return {}
+
+    meta = parsed.feed
+    return {
+        "title": meta.get("title", ""),
+        "author": meta.get("author") or meta.get("publisher") or "",
+        # Feeds normally carry every episode, so this is a real count to set
+        # against Spotify's — unlike a directory's cached, often capped one.
+        "episode_count": len(parsed.entries),
+    }
+
+
+def match_show(show: dict, settings=None, search=None, verify: bool = False) -> Match:
     """Find the RSS feed for one followed Spotify show.
 
     ``search`` is injectable so this can be exercised without a network;
@@ -290,6 +327,25 @@ def match_show(show: dict, settings=None, search=None) -> Match:
     found.sort(key=lambda c: -c.score)
 
     best = found[0]
+
+    if verify and best.feed_url:
+        # Fill in what the directory couldn't tell us, then re-score against
+        # the feed's own name so the verdict rests on real data.
+        probe = probe_feed(best.feed_url)
+        if probe:
+            best.artist = best.artist or probe.get("author", "")
+            best.episode_count = best.episode_count or probe.get("episode_count")
+            best.probed = True
+            if probe.get("title"):
+                best.score = max(
+                    best.score, score_candidate(name, Candidate("", probe["title"]), episodes)
+                )
+        else:
+            # Couldn't read it at all — never present that as confident.
+            best.score = min(best.score, CONFIDENT - 1)
+            found.sort(key=lambda c: -c.score)
+            best = found[0]
+
     if best.score >= CONFIDENT:
         verdict, reason = "confident", ""
     elif best.score >= PLAUSIBLE:
@@ -330,7 +386,9 @@ def match_show(show: dict, settings=None, search=None) -> Match:
     return Match(show=show, candidates=found, verdict=verdict, reason=reason)
 
 
-def match_shows(shows: list[dict], settings=None, search=None, progress=None) -> list[Match]:
+def match_shows(
+    shows: list[dict], settings=None, search=None, progress=None, verify: bool = False
+) -> list[Match]:
     """Match several shows, pacing the requests.
 
     ``progress(done, total, name)`` is called as it goes, so a slow run can
@@ -341,7 +399,7 @@ def match_shows(shows: list[dict], settings=None, search=None, progress=None) ->
     for index, show in enumerate(shows, start=1):
         if progress:
             progress(index, total, (show.get("name") or "").strip())
-        matches.append(match_show(show, settings=settings, search=search))
+        matches.append(match_show(show, settings=settings, search=search, verify=verify))
         if index < total:
             time.sleep(THROTTLE_SECONDS)
     return matches

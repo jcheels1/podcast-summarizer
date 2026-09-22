@@ -220,6 +220,45 @@ seen = []
 fm.match_shows(shows[:3], search=fake_search, progress=lambda d, t, n: seen.append((d, t, n)))
 check("progress reports each show", len(seen) == 3 and seen[0][1] == 3, str(seen))
 
+# --- verification against the feed itself -----------------------------------
+print()
+print("--- feed verification ---")
+
+# Podverse returns neither publisher nor episode count, so reading the feed
+# is what lets a verdict rest on more than a name.
+def thin_search(term, limit=None):
+    return [fm.Candidate(feed_url="https://feeds.test/thin", name="Odd Lots")]
+
+
+ODD = {"name": "Odd Lots", "total_episodes": 1277}
+
+fm.probe_feed = lambda url: {"title": "Odd Lots", "author": "Bloomberg", "episode_count": 1277}
+verified = fm.match_show(ODD, search=thin_search, verify=True)
+check("probe supplies the missing publisher", verified.best.artist == "Bloomberg", verified.best.artist)
+check("probe supplies the missing episode count", verified.best.episode_count == 1277)
+check("probed flag is set", verified.best.probed is True)
+check("verified exact match is confident", verified.verdict == "confident", verified.verdict)
+
+# A feed whose real count contradicts Spotify must not be confident even
+# with an identical name: the "different show, same title" case that thin
+# directory metadata would otherwise hide.
+fm.probe_feed = lambda url: {"title": "Odd Lots", "author": "Someone Else", "episode_count": 12}
+contradicted = fm.match_show(ODD, search=thin_search, verify=True)
+check("feed contradicting Spotify is demoted", contradicted.verdict == "review", contradicted.verdict)
+check("demotion explains itself", "episodes" in contradicted.reason.lower(), contradicted.reason)
+
+# An unreadable feed lowers trust rather than crashing the run.
+fm.probe_feed = lambda url: {}
+unreadable = fm.match_show(ODD, search=thin_search, verify=True)
+check("unreadable feed is never confident", unreadable.verdict != "confident", unreadable.verdict)
+check("unreadable feed still yields a candidate", unreadable.best is not None)
+
+# Off by default, so callers that don't need it don't pay for it.
+calls = []
+fm.probe_feed = lambda url: calls.append(url) or {}
+fm.match_show(ODD, search=thin_search)
+check("no probe unless asked", calls == [], str(calls))
+
 print(f"\n{len(PASS)} passed, {len(FAIL)} failed")
 if FAIL:
     print("FAILED: " + ", ".join(FAIL))
