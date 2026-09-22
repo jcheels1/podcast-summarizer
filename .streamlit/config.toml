@@ -1,0 +1,16 @@
+# Local Streamlit settings.
+
+[server]
+# Poll file modification times instead of subscribing to filesystem events.
+#
+# This project lives on a Google Drive virtual drive (G:\My Drive\...), which
+# does not emit the OS-level change notifications the default watchdog
+# watcher listens for. With the watcher deaf, Streamlit never notices an
+# edited module and keeps the stale one in sys.modules — so a rerun
+# re-executes app.py and the app_pages/ scripts against an out-of-date ui.py
+# or stores.py. That shows up as a baffling AttributeError or TypeError
+# naming a function you can see is right there in the file, and the only cure
+# is restarting the server by hand.
+#
+# Polling costs a little idle CPU and fixes that. Harmless on a normal disk.
+fileWatcherType = "poll"
