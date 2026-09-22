@@ -5,7 +5,9 @@ Every document opens with the same identifying header — show, episode,
 guests, date — so a PDF that has been downloaded, emailed or filed away
 still says what it came from.
 """
-from __future__ import annotations
+# Deliberately no `from __future__ import annotations` in this module:
+# it defines dataclasses, and see BUILD_NOTES.md ("Dataclasses and
+# postponed annotations") for why the two don't mix here.
 
 import io
 from dataclasses import dataclass, field

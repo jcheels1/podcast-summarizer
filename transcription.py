@@ -9,7 +9,9 @@ Whatever comes back from here is *raw*: at best per-chunk labels like
 "Speaker 1". Turning those into a real person's name, held consistent for
 the whole episode, is `speakers.py`'s job and happens after transcription.
 """
-from __future__ import annotations
+# Deliberately no `from __future__ import annotations` in this module:
+# it defines dataclasses, and see BUILD_NOTES.md ("Dataclasses and
+# postponed annotations") for why the two don't mix here.
 
 import json
 import re

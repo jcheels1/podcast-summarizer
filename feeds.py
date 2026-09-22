@@ -10,7 +10,9 @@ audio enclosure URLs and all.
 Nothing here downloads audio or calls an LLM — that only happens when you
 ask for a transcript or a summary of a specific episode.
 """
-from __future__ import annotations
+# Deliberately no `from __future__ import annotations` in this module:
+# it defines dataclasses, and see BUILD_NOTES.md ("Dataclasses and
+# postponed annotations") for why the two don't mix here.
 
 import re
 from dataclasses import dataclass, field

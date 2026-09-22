@@ -340,3 +340,50 @@ one domain — an environment issue, not something fixable in this app's code.
 with a matching type, rather than assuming fixed property names. If you
 rename or restructure your Notion database, no code changes should be
 needed as long as it still has a title property.
+
+## Dataclasses and postponed annotations
+
+Ten modules here define dataclasses — `config`, `feeds`, `feed_matching`,
+`jobs`, `library`, `pdf_export`, `speakers`, `summarizer`, `transcription`
+and `resolvers/common` — and none of them may use
+`from __future__ import annotations`. Adding it back will take the whole app
+down, so the omission is deliberate and each file says so at the top.
+
+That import turns every annotation into a string. `dataclasses` then has to
+resolve those strings to check each field for `KW_ONLY`, and it does so via:
+
+```python
+ns = sys.modules.get(cls.__module__).__dict__
+```
+
+with no `None` check. During an ordinary import the module is already in
+`sys.modules`, so this is fine. It is not fine during a *reload*: Streamlit
+hot-reloads a changed module by dropping it from `sys.modules` and
+re-importing it, and the class body then runs while its own entry is
+missing. The dataclass can't be constructed and the app dies at import
+with:
+
+```
+AttributeError: 'NoneType' object has no attribute '__dict__'
+```
+
+visible only in the deploy logs — the browser just shows Streamlit's
+"Oh no. Error running app." with no traceback. This actually happened, and
+cost a while to find because the named file (`jobs.py:40`) had not been
+edited; the module that *had* changed was elsewhere in the import graph.
+
+Two separate things guard against it now:
+
+- `.streamlit/config.toml` sets `fileWatcherType = "none"`, so the deployed
+  app never reloads modules. Local development opts back into polling
+  through `Launch Podcast Summarizer.bat`, because this project lives on a
+  Google Drive virtual drive that emits no filesystem events, and without a
+  watcher an edited module stays stale until the server is restarted by
+  hand.
+- `tests/test_module_reload.py` executes each of those modules' source in a
+  namespace that is deliberately *not* registered in `sys.modules`, which is
+  exactly the failing condition, and separately fails if the import is ever
+  reintroduced.
+
+Not version-specific, incidentally: it reproduces on 3.13 as readily as on
+the 3.14 that Streamlit Community Cloud runs.

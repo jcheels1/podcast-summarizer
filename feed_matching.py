@@ -22,7 +22,9 @@ Two things make the guess harder than it sounds:
   reported as unmatched with a reason rather than matched to whatever
   public show happens to share a word.
 """
-from __future__ import annotations
+# Deliberately no `from __future__ import annotations` in this module:
+# it defines dataclasses, and see BUILD_NOTES.md ("Dataclasses and
+# postponed annotations") for why the two don't mix here.
 
 import re
 import time

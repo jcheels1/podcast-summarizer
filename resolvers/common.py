@@ -1,5 +1,7 @@
 """Shared types and helpers used by all source-specific resolvers."""
-from __future__ import annotations
+# Deliberately no `from __future__ import annotations` in this module:
+# it defines dataclasses, and see BUILD_NOTES.md ("Dataclasses and
+# postponed annotations") for why the two don't mix here.
 
 import mimetypes
 import re

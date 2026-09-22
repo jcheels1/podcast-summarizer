@@ -9,7 +9,9 @@ a summary after a transcript costs only the summary, and asking twice costs
 nothing. Everything is reported through ``on_step`` / ``on_progress`` so the
 UI can show what's happening without this module importing Streamlit.
 """
-from __future__ import annotations
+# Deliberately no `from __future__ import annotations` in this module:
+# it defines dataclasses, and see BUILD_NOTES.md ("Dataclasses and
+# postponed annotations") for why the two don't mix here.
 
 import tempfile
 from dataclasses import dataclass, field

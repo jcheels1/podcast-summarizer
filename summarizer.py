@@ -14,7 +14,9 @@ Three interchangeable backends, all driven by the same prompts:
 A backend is just a callable ``(prompt: str) -> str``; everything else in
 this module is provider-agnostic.
 """
-from __future__ import annotations
+# Deliberately no `from __future__ import annotations` in this module:
+# it defines dataclasses, and see BUILD_NOTES.md ("Dataclasses and
+# postponed annotations") for why the two don't mix here.
 
 import contextlib
 import json

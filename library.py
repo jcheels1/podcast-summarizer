@@ -13,7 +13,9 @@ the feed show "Transcript ✓ / Summary ✓" without opening anything, and what
 carries a show's recurring hosts from one episode to the next so speaker
 naming keeps improving the more of a show you process.
 """
-from __future__ import annotations
+# Deliberately no `from __future__ import annotations` in this module:
+# it defines dataclasses, and see BUILD_NOTES.md ("Dataclasses and
+# postponed annotations") for why the two don't mix here.
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
