@@ -31,6 +31,7 @@ import time
 import unicodedata
 from dataclasses import dataclass, field
 
+import requests
 from rapidfuzz import fuzz
 
 import directory
@@ -53,6 +54,11 @@ EPISODE_AGREEMENT_FLOOR = 0.6
 THROTTLE_SECONDS = 0.4
 
 SEARCH_LIMIT = 8
+
+# Ceiling on how much of a candidate's feed is downloaded to identify it.
+# Enough for any feed's header, and for the whole document of all but the
+# longest-running shows. See probe_feed.
+MAX_PROBE_BYTES = 6 * 1024 * 1024
 
 
 # Re-exported so callers catch one name regardless of which directory
@@ -261,24 +267,52 @@ def probe_feed(feed_url: str) -> dict:
 
     Returns ``{}`` rather than raising: a feed that won't parse is a reason
     to trust the match less, not a reason to abandon the whole run.
+
+    The download is capped. Podcast feeds list every episode ever published,
+    and this library follows shows with thousands — one feed can run to tens
+    of megabytes, and parsing it costs several times that. Matching a whole
+    library would do it eighty times over on a container that has already
+    been OOM-killed once today. A feed's title and author sit in its header,
+    before the first episode, so a capped read still identifies the show;
+    only the episode count needs the whole document, and it is simply
+    omitted when the cap is hit rather than reported wrongly.
     """
     import feedparser
 
     try:
-        parsed = feedparser.parse(feed_url)
+        resp = requests.get(
+            feed_url,
+            headers={"User-Agent": directory.USER_AGENT},
+            timeout=directory.REQUEST_TIMEOUT,
+            stream=True,
+        )
+        if resp.status_code != 200:
+            return {}
+        chunks, size, truncated = [], 0, False
+        for chunk in resp.iter_content(64 * 1024):
+            chunks.append(chunk)
+            size += len(chunk)
+            if size > MAX_PROBE_BYTES:
+                truncated = True
+                break
+        resp.close()
+        parsed = feedparser.parse(b"".join(chunks))
     except Exception:  # noqa: BLE001 - treated as "no extra information"
         return {}
-    if not parsed.entries:
+
+    meta = getattr(parsed, "feed", None)
+    if not meta:
         return {}
 
-    meta = parsed.feed
-    return {
+    result = {
         "title": meta.get("title", ""),
         "author": meta.get("author") or meta.get("publisher") or "",
+    }
+    if not truncated and parsed.entries:
         # Feeds normally carry every episode, so this is a real count to set
         # against Spotify's — unlike a directory's cached, often capped one.
-        "episode_count": len(parsed.entries),
-    }
+        result["episode_count"] = len(parsed.entries)
+    return result
 
 
 def match_show(show: dict, settings=None, search=None, verify: bool = False) -> Match:

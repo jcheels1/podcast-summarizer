@@ -51,8 +51,15 @@ class Store(Protocol):
     def write(self, key: str, value) -> None:
         """Create or replace the document at ``key``."""
 
+    def delete(self, key: str) -> None:
+        """Remove exactly the document at ``key``, and nothing else."""
+
     def delete_prefix(self, prefix: str) -> None:
-        """Remove every document whose key starts with ``prefix``."""
+        """Remove every document whose key starts with ``prefix``.
+
+        Note this is a *prefix*, not a path segment: deleting "a/b" also
+        removes "a/bc". Use ``delete`` for a single document.
+        """
 
     @property
     def label(self) -> str:
@@ -94,6 +101,9 @@ class LocalStore:
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(value, indent=2, ensure_ascii=False), encoding="utf-8")
         tmp.replace(path)
+
+    def delete(self, key: str) -> None:
+        self._path(key).unlink(missing_ok=True)
 
     def delete_prefix(self, prefix: str) -> None:
         directory = self.data_dir / prefix.rstrip("/")
@@ -176,6 +186,13 @@ class PostgresStore:
                     """,
                     (key, json.dumps(value, ensure_ascii=False)),
                 )
+            conn.commit()
+
+    def delete(self, key: str) -> None:
+        with self._connect() as conn:
+            self._ensure_table(conn)
+            with conn.cursor() as cur:
+                cur.execute(f"DELETE FROM {self.TABLE} WHERE key = %s", (key,))
             conn.commit()
 
     def delete_prefix(self, prefix: str) -> None:

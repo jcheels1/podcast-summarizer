@@ -180,8 +180,48 @@ def exchange_code(settings, store: Store, code: str, state: str) -> dict:
         "connected_at": _now(),
     }
     store.write(CONNECTION_KEY, record)
-    store.delete_prefix(PENDING_KEY)
+    store.delete(PENDING_KEY)
     return record
+
+
+# --- what to skip, and what's already been brought over ----------------------
+
+IGNORED_KEY = integration_key("spotify_ignored")
+IMPORTED_KEY = integration_key("spotify_imported")
+
+
+def ignored_shows(store: Store) -> dict:
+    """Spotify show id -> name, for shows deliberately left out.
+
+    Kept in the store rather than session state because the decision is
+    permanent: a library of 80 shows includes plenty that will never be
+    worth transcribing, and being asked about them on every sync is the
+    thing that makes a bulk import tedious.
+    """
+    record = store.read(IGNORED_KEY)
+    return record if isinstance(record, dict) else {}
+
+
+def set_ignored(store: Store, ignored: dict) -> None:
+    store.write(IGNORED_KEY, ignored)
+
+
+def imported_shows(store: Store) -> dict:
+    """Spotify show id -> feed URL, for shows already followed from a sync.
+
+    Lets the picker say which shows are done, so a second pass over a large
+    library only offers what's left.
+    """
+    record = store.read(IMPORTED_KEY)
+    return record if isinstance(record, dict) else {}
+
+
+def record_imported(store: Store, spotify_id: str, feed_url: str) -> None:
+    if not spotify_id:
+        return
+    current = imported_shows(store)
+    current[spotify_id] = feed_url
+    store.write(IMPORTED_KEY, current)
 
 
 def connection(store: Store) -> dict | None:
@@ -192,9 +232,17 @@ def connection(store: Store) -> dict | None:
 
 def disconnect(store: Store) -> None:
     """Forget the refresh token. Does not revoke the grant on Spotify's side —
-    that lives in the user's account settings, which only they can reach."""
-    store.delete_prefix(CONNECTION_KEY)
-    store.delete_prefix(PENDING_KEY)
+    that lives in the user's account settings, which only they can reach.
+
+    Exact-key deletes, not delete_prefix: every key here starts with
+    "integrations/spotify", so a prefix delete would also take the user's
+    exclusions and import history with it. The two stores disagreed about
+    that — LocalStore removes one file, PostgresStore runs LIKE 'prefix%'
+    — so on the deployed app disconnecting would have quietly discarded
+    curation of an 80-show library.
+    """
+    store.delete(CONNECTION_KEY)
+    store.delete(PENDING_KEY)
 
 
 # --- using the connection -----------------------------------------------------

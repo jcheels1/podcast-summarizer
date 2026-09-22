@@ -8,6 +8,7 @@ Plain scripts, no test runner needed:
 .venv/Scripts/python.exe tests/test_directory.py
 .venv/Scripts/python.exe tests/test_config_memory.py
 .venv/Scripts/python.exe tests/test_module_reload.py
+.venv/Scripts/python.exe tests/test_spotify_selection.py
 ```
 
 Each prints a PASS/FAIL line per assertion and exits non-zero if any fail.

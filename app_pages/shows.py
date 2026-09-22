@@ -72,23 +72,98 @@ def render_spotify_matching(spotify_shows: list[dict]) -> None:
         # merely dropped in our mapping.
         st.json(spotify_shows[0].get("raw", {}), expanded=False)
 
-    # Sorted and empty by default: an arbitrary "first N" default invites
-    # looking up shows you didn't choose, and the list is long enough that
-    # finding a specific one means typing to filter.
-    names = sorted((s["name"] for s in spotify_shows), key=str.lower)
+    ignored = spotify_sync.ignored_shows(library.store)
+    imported = spotify_sync.imported_shows(library.store)
+    followed_urls_now = {s.feed_url for s in library.subscriptions}
+
+    def status_of(show: dict) -> str:
+        if show.get("spotify_id") in ignored:
+            return "excluded"
+        feed = imported.get(show.get("spotify_id"))
+        if feed and feed in followed_urls_now:
+            return "imported"
+        return "todo"
+
+    by_status = {"todo": [], "imported": [], "excluded": []}
+    for show in spotify_shows:
+        by_status[status_of(show)].append(show)
+
+    st.caption(
+        f"{len(by_status['todo'])} still to do · {len(by_status['imported'])} already followed · "
+        f"{len(by_status['excluded'])} excluded"
+    )
+
+    # --- excluding shows you never want -------------------------------------
+    with st.expander(
+        f"Exclude shows ({len(by_status['excluded'])} excluded)", icon=":material/block:"
+    ):
+        st.caption(
+            "Excluded shows are skipped by the picker below and stay skipped on future syncs. "
+            "A library this size has plenty that are never worth transcribing."
+        )
+        to_exclude = st.multiselect(
+            "Exclude these",
+            [s["name"] for s in by_status["todo"] + by_status["imported"]],
+            key="spotify_exclude_pick",
+        )
+        with st.container(horizontal=True, vertical_alignment="center"):
+            if st.button("Exclude", icon=":material/block:", disabled=not to_exclude):
+                chosen = set(to_exclude)
+                updated = dict(ignored)
+                for show in spotify_shows:
+                    if show["name"] in chosen:
+                        updated[show.get("spotify_id") or show["name"]] = show["name"]
+                spotify_sync.set_ignored(library.store, updated)
+                st.rerun()
+            if ignored and st.button("Clear exclusions", icon=":material/undo:"):
+                spotify_sync.set_ignored(library.store, {})
+                st.rerun()
+        if ignored:
+            st.caption("Excluded: " + ", ".join(sorted(ignored.values())))
+
+    # --- picking what to look up --------------------------------------------
+    candidates = by_status["todo"]
+    if not candidates:
+        st.info("Nothing left to match — every show is either followed or excluded.")
+        return
+
+    names = sorted((s["name"] for s in candidates), key=str.lower)
+    picker_key = "spotify_pick_names"
+
+    # Buttons rather than a default: at 80 shows, hand-picking each one is
+    # the tedious part, but a silent "everything" default would look up
+    # shows the user never chose. A keyed multiselect also ignores `default`
+    # after its first render, so bulk selection has to write the key.
+    with st.container(horizontal=True, vertical_alignment="center"):
+        if st.button(f"Select all {len(names)}", icon=":material/select_all:"):
+            st.session_state[picker_key] = names
+            st.rerun()
+        if st.button(f"Select next {MATCH_BATCH_DEFAULT}", icon=":material/playlist_add:"):
+            st.session_state[picker_key] = names[:MATCH_BATCH_DEFAULT]
+            st.rerun()
+        if st.button("Clear", icon=":material/clear:"):
+            st.session_state[picker_key] = []
+            st.rerun()
+
     chosen_names = st.multiselect(
         "Shows to look up",
         names,
+        key=picker_key,
         help=(
-            f"Type to filter. Each one costs a search against Apple's directory, which is rate "
-            f"limited, so try {MATCH_BATCH_DEFAULT} or so at a time rather than all of them."
+            "Type to filter. Each show costs a directory search and one feed read, so a big "
+            "batch takes a while — the progress bar names what it's on."
         ),
     )
     if not chosen_names:
-        st.caption(f"Pick some shows above — {MATCH_BATCH_DEFAULT} or fewer to start.")
+        st.caption("Nothing picked yet.")
+    elif len(chosen_names) > MATCH_BATCH_DEFAULT:
+        st.caption(
+            f"{len(chosen_names)} shows — roughly {round(len(chosen_names) * 2.5)}s. "
+            "Leave the tab open while it runs."
+        )
 
     if st.button("Find feeds", icon=":material/search:", disabled=not chosen_names):
-        selected = [s for s in spotify_shows if s["name"] in chosen_names]
+        selected = [s for s in candidates if s["name"] in chosen_names]
         progress = st.progress(0.0, text="Searching Apple's directory...")
 
         def report(done: int, total: int, name: str) -> None:
@@ -113,9 +188,9 @@ def render_spotify_matching(spotify_shows: list[dict]) -> None:
         f"{len(buckets['none'])} not found"
     )
 
-    # feed_url -> show name, for everything ticked. A dict rather than a list
-    # so picking the same feed for two shows can't create a duplicate.
-    picks: dict[str, str] = {}
+    # feed_url -> {name, spotify_id} for everything ticked. A dict keyed by
+    # URL so picking the same feed for two shows can't create a duplicate.
+    picks: dict[str, dict] = {}
 
     if buckets["confident"]:
         st.markdown("**Confident matches**")
@@ -146,7 +221,10 @@ def render_spotify_matching(spotify_shows: list[dict]) -> None:
                 st.caption(f"{label} — already following")
                 continue
             if st.checkbox(label, key=f"spotify_pick_{match.spotify_name}"):
-                picks[best.feed_url] = best.name
+                picks[best.feed_url] = {
+                    "name": best.name,
+                    "spotify_id": match.show.get("spotify_id", ""),
+                }
             st.caption(
                 f"score {best.score} · {best.episode_count or '?'} episodes on Apple vs "
                 f"{match.show.get('total_episodes') or '?'} on Spotify"
@@ -188,7 +266,10 @@ def render_spotify_matching(spotify_shows: list[dict]) -> None:
                 if picked.feed_url in followed_urls:
                     st.caption("Already following that feed.")
                 else:
-                    picks[picked.feed_url] = picked.name
+                    picks[picked.feed_url] = {
+                        "name": picked.name,
+                        "spotify_id": match.show.get("spotify_id", ""),
+                    }
 
     if buckets["none"]:
         st.markdown("**Not found**")
@@ -201,7 +282,10 @@ def render_spotify_matching(spotify_shows: list[dict]) -> None:
                 label_visibility="collapsed",
             )
             if manual.strip():
-                picks[manual.strip()] = match.spotify_name
+                picks[manual.strip()] = {
+                    "name": match.spotify_name,
+                    "spotify_id": match.show.get("spotify_id", ""),
+                }
 
     st.divider()
     if st.button(
@@ -212,7 +296,8 @@ def render_spotify_matching(spotify_shows: list[dict]) -> None:
     ):
         added, failed = 0, []
         bar = st.progress(0.0, text="Checking feeds...")
-        for index, (feed_url, name) in enumerate(picks.items(), start=1):
+        for index, (feed_url, pick) in enumerate(picks.items(), start=1):
+            name = pick["name"]
             bar.progress(index / len(picks), text=f"({index}/{len(picks)}) {name}")
             try:
                 # Read each feed before committing to it, exactly as the
@@ -223,6 +308,9 @@ def render_spotify_matching(spotify_shows: list[dict]) -> None:
                 failed.append(f"{name} ({type(e).__name__})")
                 continue
             library.add_subscription(feed_url, feed.show_name or name, feed.image_url)
+            # Remember which Spotify show this came from, so a later sync
+            # can show it as done instead of offering it again.
+            spotify_sync.record_imported(library.store, pick["spotify_id"], feed_url)
             added += 1
         bar.empty()
 
