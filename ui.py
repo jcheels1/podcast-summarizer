@@ -11,6 +11,7 @@ import streamlit as st
 import jobs
 import pdf_export
 import speakers
+import spotify_sync
 import summarizer
 from config import load_settings
 from feeds import Episode
@@ -70,6 +71,45 @@ def get_library(settings=None) -> Library:
                 icon=":material/database_off:",
             )
         return Library.load(LocalStore())
+
+
+def handle_spotify_callback(settings) -> None:
+    """Finish a Spotify connection if this page load is the OAuth callback.
+
+    Called from app.py rather than the Shows page, because Spotify redirects
+    to one registered URI — the app root — which lands on whichever page is
+    default. It must also run *after* the password gate: the redirect is a
+    fresh page load, so it starts a new Streamlit session that has to log in
+    again before anything else happens. The ``?code=`` survives that, since
+    logging in only reruns the script.
+    """
+    code = st.query_params.get("code")
+    error = st.query_params.get("error")
+    if not (code or error):
+        return
+
+    if error:
+        # The user pressed "Cancel" on Spotify's consent screen, or the app's
+        # registration is wrong. Either way there's nothing to exchange.
+        result = ("error", f"Spotify didn't grant access ({error}).")
+    else:
+        try:
+            record = spotify_sync.exchange_code(
+                settings, make_store(settings.database_url), code, st.query_params.get("state")
+            )
+        except spotify_sync.SpotifyAuthError as e:
+            result = ("error", str(e))
+        else:
+            result = ("ok", f"Spotify connected (scope: {record.get('scope') or 'none reported'}).")
+
+    st.session_state["spotify_auth_result"] = result
+    # This URL has been spent either way — its state token is consumed on
+    # success and stale on failure.
+    st.session_state.pop("spotify_authorize_url", None)
+    # Drop the code from the URL before anything can re-submit it: the code is
+    # single use, so a refresh would otherwise fail confusingly.
+    st.query_params.clear()
+    st.rerun()
 
 
 def store_caption(library: Library, settings=None) -> None:

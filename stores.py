@@ -35,6 +35,12 @@ def episode_prefix(episode_key: str) -> str:
     return f"episodes/{episode_key}/"
 
 
+def integration_key(name: str) -> str:
+    """Where a third-party connection's tokens live. Kept in the same store as
+    the library so a connection made on the deployed app survives a restart."""
+    return f"integrations/{name}"
+
+
 class Store(Protocol):
     """A JSON document store. Implementations must be safe to construct per
     run — the app builds one on every Streamlit rerun."""

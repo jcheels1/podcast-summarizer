@@ -33,6 +33,11 @@ class Settings:
     notion_database_id: str | None
     spotify_client_id: str | None
     spotify_client_secret: str | None
+    # Where Spotify sends the browser back after you approve access. Must
+    # match a Redirect URI registered in the Spotify dashboard exactly.
+    # Only needed to sync your followed shows; resolving a pasted Spotify
+    # link works without it. See spotify_sync.py.
+    spotify_redirect_uri: str | None
     groq_api_key: str | None
     gemini_api_key: str | None
     app_password: str | None
@@ -65,6 +70,7 @@ def load_settings() -> Settings:
         notion_database_id=_get("NOTION_DATABASE_ID"),
         spotify_client_id=_get("SPOTIFY_CLIENT_ID"),
         spotify_client_secret=_get("SPOTIFY_CLIENT_SECRET"),
+        spotify_redirect_uri=_get("SPOTIFY_REDIRECT_URI"),
         groq_api_key=_get("GROQ_API_KEY"),
         gemini_api_key=_get("GEMINI_API_KEY"),
         app_password=_get("APP_PASSWORD"),

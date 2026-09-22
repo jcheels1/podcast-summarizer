@@ -62,6 +62,10 @@ if not SUMMARY_PROVIDERS:
     )
     st.stop()
 
+# Before routing: this load may be Spotify handing back an authorization
+# code, which has to be exchanged regardless of which page is showing.
+ui.handle_spotify_callback(settings)
+
 ui.init_state(SUMMARY_PROVIDERS)
 ui.settings_sidebar(settings, SUMMARY_PROVIDERS)
 
