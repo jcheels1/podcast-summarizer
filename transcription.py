@@ -22,7 +22,6 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from faster_whisper import WhisperModel
 
 LOCAL_MODEL_SIZES = ["tiny", "base", "small", "medium", "large-v3"]
 GROQ_MODELS = ["whisper-large-v3-turbo", "whisper-large-v3"]
@@ -40,7 +39,9 @@ GROQ_CHUNK_SECONDS = 600
 # keep each response comfortably inside that ceiling.
 GEMINI_CHUNK_SECONDS = 1800
 
-_model_cache: dict[str, WhisperModel] = {}
+# Keyed by model size. Values are faster_whisper.WhisperModel, but the
+# annotation stays a string because the class is imported lazily below.
+_model_cache: "dict[str, object]" = {}
 
 
 @dataclass
@@ -127,7 +128,23 @@ def transcribe(
     return transcribe_local(audio_path, model_size=model, progress_callback=progress_callback)
 
 
-def _get_local_model(model_size: str) -> WhisperModel:
+def _get_local_model(model_size: str):
+    """Load (and cache) a local Whisper model.
+
+    faster_whisper is imported here rather than at module scope, and that
+    placement is load-bearing rather than tidiness. Importing it pulls in
+    ctranslate2, onnxruntime and tokenizers — hundreds of megabytes of
+    native libraries — and this module is reached from ui.py, so every
+    startup paid that cost. In a hosted container with about a gigabyte,
+    that was enough to get the process OOM-killed before anyone asked for a
+    transcript: the app died with no traceback (Streamlit's "Oh no." and a
+    503) whichever provider was selected.
+
+    Deferring it means a deployed app using Groq or Gemini never loads
+    Whisper at all, while local transcription works exactly as before.
+    """
+    from faster_whisper import WhisperModel
+
     if model_size not in _model_cache:
         _model_cache[model_size] = WhisperModel(model_size, device="auto", compute_type="auto")
     return _model_cache[model_size]
