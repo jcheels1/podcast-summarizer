@@ -96,11 +96,22 @@ def ffmpeg_available() -> bool:
     return shutil.which("ffmpeg") is not None
 
 
-# Loading faster-whisper's `small` model and holding an hour of decoded audio
-# needs well over a gigabyte. Below this there is no point offering local
-# transcription: the process is killed mid-run, which takes the whole app
-# with it rather than producing an error anyone can act on.
-MIN_LOCAL_TRANSCRIPTION_MB = 2048
+# Below this much memory, local transcription is not offered: the process
+# gets killed mid-run, and an OOM kill takes the whole app with it rather
+# than producing an error anyone can act on.
+#
+# The number is measured, not guessed. A Streamlit Community Cloud container
+# reports a 3072 MB ceiling, and it was still killed transcribing a
+# 90-minute episode. Startup logging showed why: the app imports at 102 MB,
+# and merely loading faster-whisper's `small` model takes it to 890 MB —
+# before a single second of audio is decoded. Decoded audio and accumulated
+# segments then scale with episode length, and an hour and a half of them
+# does not fit in the remaining ~2 GB.
+#
+# So 3072 is known-insufficient and the bar sits well above it. A machine
+# with 6 GB has real headroom; anything less should use Groq or Gemini,
+# which do the work elsewhere and cost this process almost nothing.
+MIN_LOCAL_TRANSCRIPTION_MB = 6144
 
 
 def available_memory_mb() -> int | None:

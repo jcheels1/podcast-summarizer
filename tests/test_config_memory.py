@@ -32,6 +32,16 @@ try:
     config.available_memory_mb = lambda: 8192
     check("8GB machine is viable", config.local_transcription_viable()[0] is True)
 
+    # The measured case: Streamlit Cloud reports 3072MB and was still killed
+    # transcribing a 90-minute episode, so that must not count as viable.
+    config.available_memory_mb = lambda: 3072
+    viable, reason = config.local_transcription_viable()
+    check("3GB hosted container is NOT viable", viable is False, str(viable))
+    check("3GB reason quotes the measurement", "3072 MB" in reason, reason)
+
+    config.available_memory_mb = lambda: 32239
+    check("developer laptop stays viable", config.local_transcription_viable()[0] is True)
+
     config.available_memory_mb = lambda: config.MIN_LOCAL_TRANSCRIPTION_MB
     check("exactly at the threshold is viable", config.local_transcription_viable()[0] is True)
 
